@@ -25,7 +25,7 @@ fn main() -> WfpResult<()> {
 
     // Initialize WFP
     println!("📡 Opening WFP Engine...");
-    let engine = WfpEngine::new("TRusTY Wall Simple", "Simple block test", 5000)?;
+    let engine = WfpEngine::new()?;
     println!("✓ Engine opened\n");
 
     println!("🏗️  Registering provider...");
@@ -49,8 +49,7 @@ fn main() -> WfpResult<()> {
         protocol: None,
     };
 
-    let mut filter_builder = FilterBuilder::new(&engine);
-    let filter_id = filter_builder.add_filter(&notepad_rule)?;
+    let filter_id = FilterBuilder::add_filter(&engine, &notepad_rule)?;
     println!("✓ Filter added (ID: {})\n", filter_id);
 
     println!("⏳ Filter active for 10 seconds...");
@@ -62,7 +61,7 @@ fn main() -> WfpResult<()> {
     }
 
     println!("\n🧹 Removing filter...");
-    filter_builder.delete_filter(filter_id)?;
+    FilterBuilder::delete_filter(&engine, filter_id)?;
     println!("✓ Filter removed\n");
 
     println!("✨ Demo complete!");

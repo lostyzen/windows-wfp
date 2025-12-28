@@ -25,8 +25,8 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 use trusty_wfp::{
-    WfpEngine, WfpProvider, WfpSublayer, FilterBuilder, WfpEventSubscription,
-    NetworkEvent, NetworkEventType, WfpResult, initialize_wfp,
+    WfpEngine, FilterBuilder, WfpEventSubscription,
+    NetworkEvent, WfpResult, initialize_wfp,
 };
 use trusty_domain::{
     RuleDef, Direction, RuleAction, FilterWeight,
@@ -48,7 +48,7 @@ fn main() -> WfpResult<()> {
 
     // Step 1: Initialize WFP Engine
     println!("📡 Step 1: Opening WFP Engine session...");
-    let engine = WfpEngine::new("TRusTY Wall Demo", "Live firewall test", 5000)?;
+    let engine = WfpEngine::new()?;
     println!("   ✓ Engine session opened\n");
 
     // Step 2: Register Provider & Sublayer
@@ -81,8 +81,7 @@ fn main() -> WfpResult<()> {
         protocol: None,
     };
 
-    let mut filter_builder = FilterBuilder::new(&engine);
-    let filter_id = filter_builder.add_filter(&block_rule)?;
+    let filter_id = FilterBuilder::add_filter(&engine, &block_rule)?;
     println!("   ✓ Filter added (ID: {})\n", filter_id);
 
     // Step 5: Monitor events
@@ -122,7 +121,7 @@ fn main() -> WfpResult<()> {
 
     // Cleanup
     println!("\n🧹 Cleaning up...");
-    filter_builder.delete_filter(filter_id)?;
+    FilterBuilder::delete_filter(&engine, filter_id)?;
     println!("   ✓ Filter removed");
     drop(event_subscription);
     println!("   ✓ Event subscription closed");
@@ -185,7 +184,7 @@ fn is_elevated() -> bool {
     #[cfg(windows)]
     {
         use std::mem;
-        use windows::Win32::Foundation::{HANDLE, BOOL, CloseHandle};
+        use windows::Win32::Foundation::{HANDLE, CloseHandle};
         use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
         use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -197,7 +196,7 @@ fn is_elevated() -> bool {
                 return false;
             }
 
-            let mut elevation = TOKEN_ELEVATION { TokenIsElevated: BOOL(0) };
+            let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
             let mut returned_length: u32 = 0;
 
             let result = GetTokenInformation(
@@ -210,7 +209,7 @@ fn is_elevated() -> bool {
 
             let _ = CloseHandle(token);
 
-            result.is_ok() && elevation.TokenIsElevated.as_bool()
+            result.is_ok() && elevation.TokenIsElevated != 0
         }
     }
 
