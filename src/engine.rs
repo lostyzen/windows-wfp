@@ -81,7 +81,7 @@ impl WfpEngine {
         unsafe {
             let result = FwpmEngineOpen0(
                 PCWSTR::null(),
-                0, // RPC_C_AUTHN_WINNT
+                10, // RPC_C_AUTHN_WINNT (Windows NT authentication)
                 None,
                 Some(&session),
                 &mut handle,
@@ -91,7 +91,11 @@ impl WfpEngine {
                 return match result {
                     5 => Err(WfpError::InsufficientPermissions),
                     1062 | 1075 => Err(WfpError::ServiceNotAvailable),
-                    _ => Err(WfpError::EngineOpenFailed),
+                    _ => Err(WfpError::Other(format!(
+                        "FwpmEngineOpen0 failed with Windows error code: {} (0x{:X}). \
+                        Common causes: BFE service not running, insufficient privileges, or WFP driver not loaded.",
+                        result, result
+                    ))),
                 };
             }
         }

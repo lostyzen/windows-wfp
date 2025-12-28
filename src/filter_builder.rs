@@ -1,15 +1,42 @@
 //! WFP Filter translation from domain RuleDef
 //!
 //! Translates platform-agnostic RuleDef into WFP FWPM_FILTER0 structures.
+//!
+//! # Path Format Conversion
+//!
+//! **CRITICAL**: WFP operates at the Windows kernel level and requires NT kernel paths,
+//! not DOS paths. This module automatically converts DOS paths to NT kernel format using
+//! the `FwpmGetAppIdFromFileName0` API.
+//!
+//! ## Why This Matters
+//!
+//! - **DOS path**: `C:\Windows\System32\curl.exe` (user-friendly format)
+//! - **NT kernel path**: `\device\harddiskvolume4\windows\system32\curl.exe` (kernel format)
+//!
+//! When a process makes a network connection, WFP identifies it using the NT kernel path.
+//! If your filter uses a DOS path, it will be added successfully but will **never match**
+//! any traffic because the path comparison fails at the kernel level.
+//!
+//! ## Implementation
+//!
+//! The `add_filter()` method automatically handles this conversion:
+//! 1. Takes a DOS path from `RuleDef.app_path` (e.g., `PathBuf::from(r"C:\Windows\System32\curl.exe")`)
+//! 2. Calls `FwpmGetAppIdFromFileName0` to convert it to NT kernel format
+//! 3. Uses the converted path in the WFP filter condition
+//! 4. Properly frees the allocated memory after filter creation
+//!
+//! This ensures filters work correctly without requiring users to know about NT kernel paths.
 
 use crate::constants::*;
 use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FwpmFilterAdd0, FwpmFilterDeleteById0, FWPM_FILTER0, FWPM_FILTER_CONDITION0,
+    FwpmFilterAdd0, FwpmFilterDeleteById0, FwpmGetAppIdFromFileName0, FwpmFreeMemory0,
+    FWPM_FILTER0, FWPM_FILTER_CONDITION0,
     FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_CONDITION_VALUE0, FWP_MATCH_EQUAL,
-    FWP_UINT16, FWP_UINT8, FWP_ACTION_TYPE, FWPM_FILTER_FLAGS, FWP_BYTE_BLOB_TYPE,
+    FWP_UINT16, FWP_UINT8, FWP_UINT64, FWP_ACTION_TYPE, FWPM_FILTER_FLAGS, FWP_BYTE_BLOB_TYPE,
     FWP_V4_ADDR_AND_MASK, FWP_V6_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_V6_ADDR_MASK,
+    FWP_BYTE_BLOB,
 };
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::core::{GUID, PWSTR};
@@ -63,31 +90,141 @@ impl FilterBuilder {
         }
     }
 
-    /// Build filter conditions from RuleDef
+    /// Add filter to WFP engine
     ///
-    /// Creates condition array based on non-None fields in RuleDef.
-    fn build_conditions(rule: &RuleDef) -> WfpResult<Vec<FWPM_FILTER_CONDITION0>> {
+    /// Translates RuleDef and adds it to WFP within a transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns `WfpError::FilterAddFailed` if the filter cannot be added.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use trusty_wfp::{WfpEngine, FilterBuilder, initialize_wfp};
+    /// use trusty_domain::RuleDef;
+    ///
+    /// let engine = WfpEngine::new()?;
+    /// initialize_wfp(&engine)?;
+    ///
+    /// let rule = RuleDef::allow_outbound();
+    /// let filter_id = FilterBuilder::add_filter(&engine, &rule)?;
+    /// # Ok::<(), trusty_wfp::WfpError>(())
+    /// ```
+    pub fn add_filter(engine: &WfpEngine, rule: &RuleDef) -> WfpResult<u64> {
+        // Determine if rule uses IPv6 (based on remote_ip if present)
+        let is_ipv6 = rule.remote_ip.as_ref()
+            .map(|ip_mask| matches!(ip_mask.addr, IpAddr::V6(_)))
+            .unwrap_or(false);
+
+        let layer_key = Self::select_layer(rule.direction, is_ipv6);
+        let action = Self::translate_action(rule.action);
+
+        // Convert name to wide string - must outlive FwpmFilterAdd0 call
+        let name_wide: Vec<u16> = rule.name.encode_utf16().chain(std::iter::once(0)).collect();
+
+        // Weight storage - must outlive FwpmFilterAdd0 call
+        //
+        // IMPORTANT: WFP supports different weight types (FWP_UINT8, FWP_UINT64, etc.)
+        // TinyWall uses FWP_UINT64 to store FilterWeight values directly in millions (3M-9M).
+        // This gives much finer-grained priority control than the 0-15 range of FWP_UINT8.
+        //
+        // Priority formula: Sublayer Weight (0xFFFF) + Filter Weight (millions)
+        // Example: Sublayer 65535 + UserBlock 6000000 = Total priority 6065535
+        let weight_value: u64 = rule.weight;
+
+        // Storage for condition data that must outlive FwpmFilterAdd0 call
+
+        // CRITICAL: Convert DOS path to NT kernel format using FwpmGetAppIdFromFileName0
+        //
+        // WFP operates at the kernel level and requires NT kernel paths, not DOS paths:
+        // - DOS path:    C:\Windows\System32\curl.exe
+        // - NT path:     \device\harddiskvolume4\windows\system32\curl.exe
+        //
+        // Without this conversion, filters will be added successfully but will NEVER match
+        // any actual network traffic because WFP compares the filter path against the
+        // kernel-level path of the process making the connection.
+        //
+        // FwpmGetAppIdFromFileName0 performs the conversion and returns a FWP_BYTE_BLOB
+        // containing the NT kernel path as a wide string. This blob must be freed with
+        // FwpmFreeMemory0 after the filter is added.
+        let app_id_blob: Option<(*mut FWP_BYTE_BLOB, bool)> = rule.app_path.as_ref().and_then(|app_path| {
+            unsafe {
+                let path_str = app_path.to_string_lossy().to_string();
+                let path_wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+                let pwstr = PWSTR(path_wide.as_ptr() as *mut u16);
+
+                let mut blob_ptr: *mut FWP_BYTE_BLOB = ptr::null_mut();
+                let result = FwpmGetAppIdFromFileName0(pwstr, &mut blob_ptr);
+
+                if result == ERROR_SUCCESS.0 {
+                    // Successfully converted DOS path to NT kernel format
+                    // The blob_ptr now points to WFP-allocated memory containing the NT path
+                    Some((blob_ptr, true)) // true = needs FwpmFreeMemory0 cleanup
+                } else {
+                    // Conversion failed - file may not exist or path is invalid
+                    // Return None to skip APP_ID condition entirely
+                    None
+                }
+            }
+        });
+
+        let remote_v4_mask: Option<FWP_V4_ADDR_AND_MASK> = rule.remote_ip.as_ref().and_then(|remote_ip| {
+            if let IpAddr::V4(ipv4) = remote_ip.addr {
+                Some(FWP_V4_ADDR_AND_MASK {
+                    addr: u32::from_be_bytes(ipv4.octets()),
+                    mask: Self::prefix_to_v4_mask(remote_ip.prefix_len),
+                })
+            } else {
+                None
+            }
+        });
+
+        let remote_v6_mask: Option<FWP_V6_ADDR_AND_MASK> = rule.remote_ip.as_ref().and_then(|remote_ip| {
+            if let IpAddr::V6(ipv6) = remote_ip.addr {
+                Some(FWP_V6_ADDR_AND_MASK {
+                    addr: ipv6.octets(),
+                    prefixLength: remote_ip.prefix_len,
+                })
+            } else {
+                None
+            }
+        });
+
+        let local_v4_mask: Option<FWP_V4_ADDR_AND_MASK> = rule.local_ip.as_ref().and_then(|local_ip| {
+            if let IpAddr::V4(ipv4) = local_ip.addr {
+                Some(FWP_V4_ADDR_AND_MASK {
+                    addr: u32::from_be_bytes(ipv4.octets()),
+                    mask: Self::prefix_to_v4_mask(local_ip.prefix_len),
+                })
+            } else {
+                None
+            }
+        });
+
+        let local_v6_mask: Option<FWP_V6_ADDR_AND_MASK> = rule.local_ip.as_ref().and_then(|local_ip| {
+            if let IpAddr::V6(ipv6) = local_ip.addr {
+                Some(FWP_V6_ADDR_AND_MASK {
+                    addr: ipv6.octets(),
+                    prefixLength: local_ip.prefix_len,
+                })
+            } else {
+                None
+            }
+        });
+
+        // Build conditions - now all data is stored above and will outlive this call
         let mut conditions = Vec::new();
 
-        // Condition: APP_ID (application path)
-        if let Some(ref app_path) = rule.app_path {
-            // Convert path to wide string for WFP
-            let path_wide: Vec<u16> = app_path
-                .to_string_lossy()
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
-
+        // Condition: APP_ID (application path in NT kernel format)
+        if let Some((blob_ptr, _)) = app_id_blob {
             conditions.push(FWPM_FILTER_CONDITION0 {
                 fieldKey: CONDITION_ALE_APP_ID,
                 matchType: FWP_MATCH_EQUAL,
                 conditionValue: FWP_CONDITION_VALUE0 {
                     r#type: FWP_BYTE_BLOB_TYPE,
                     Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
-                        byteBlob: &windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_BYTE_BLOB {
-                            size: (path_wide.len() * 2) as u32,
-                            data: path_wide.as_ptr() as *mut u8,
-                        } as *const _ as *mut _,
+                        byteBlob: blob_ptr,
                     },
                 },
             });
@@ -135,123 +272,63 @@ impl FilterBuilder {
             });
         }
 
-        // Condition: REMOTE_IP
-        if let Some(ref remote_ip) = rule.remote_ip {
-            match remote_ip.addr {
-                IpAddr::V4(ipv4) => {
-                    let mask = FWP_V4_ADDR_AND_MASK {
-                        addr: u32::from_be_bytes(ipv4.octets()),
-                        mask: Self::prefix_to_v4_mask(remote_ip.prefix_len),
-                    };
-
-                    conditions.push(FWPM_FILTER_CONDITION0 {
-                        fieldKey: CONDITION_IP_REMOTE_ADDRESS,
-                        matchType: FWP_MATCH_EQUAL,
-                        conditionValue: FWP_CONDITION_VALUE0 {
-                            r#type: FWP_V4_ADDR_MASK,
-                            Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
-                                v4AddrMask: &mask as *const _ as *mut _,
-                            },
-                        },
-                    });
-                }
-                IpAddr::V6(ipv6) => {
-                    let mask = FWP_V6_ADDR_AND_MASK {
-                        addr: ipv6.octets(),
-                        prefixLength: remote_ip.prefix_len,
-                    };
-
-                    conditions.push(FWPM_FILTER_CONDITION0 {
-                        fieldKey: CONDITION_IP_REMOTE_ADDRESS,
-                        matchType: FWP_MATCH_EQUAL,
-                        conditionValue: FWP_CONDITION_VALUE0 {
-                            r#type: FWP_V6_ADDR_MASK,
-                            Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
-                                v6AddrMask: &mask as *const _ as *mut _,
-                            },
-                        },
-                    });
-                }
-            }
+        // Condition: REMOTE_IP (IPv4)
+        if let Some(ref mask) = remote_v4_mask {
+            conditions.push(FWPM_FILTER_CONDITION0 {
+                fieldKey: CONDITION_IP_REMOTE_ADDRESS,
+                matchType: FWP_MATCH_EQUAL,
+                conditionValue: FWP_CONDITION_VALUE0 {
+                    r#type: FWP_V4_ADDR_MASK,
+                    Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
+                        v4AddrMask: mask as *const _ as *mut _,
+                    },
+                },
+            });
         }
 
-        // Condition: LOCAL_IP
-        if let Some(ref local_ip) = rule.local_ip {
-            match local_ip.addr {
-                IpAddr::V4(ipv4) => {
-                    let mask = FWP_V4_ADDR_AND_MASK {
-                        addr: u32::from_be_bytes(ipv4.octets()),
-                        mask: Self::prefix_to_v4_mask(local_ip.prefix_len),
-                    };
-
-                    conditions.push(FWPM_FILTER_CONDITION0 {
-                        fieldKey: CONDITION_IP_LOCAL_ADDRESS,
-                        matchType: FWP_MATCH_EQUAL,
-                        conditionValue: FWP_CONDITION_VALUE0 {
-                            r#type: FWP_V4_ADDR_MASK,
-                            Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
-                                v4AddrMask: &mask as *const _ as *mut _,
-                            },
-                        },
-                    });
-                }
-                IpAddr::V6(ipv6) => {
-                    let mask = FWP_V6_ADDR_AND_MASK {
-                        addr: ipv6.octets(),
-                        prefixLength: local_ip.prefix_len,
-                    };
-
-                    conditions.push(FWPM_FILTER_CONDITION0 {
-                        fieldKey: CONDITION_IP_LOCAL_ADDRESS,
-                        matchType: FWP_MATCH_EQUAL,
-                        conditionValue: FWP_CONDITION_VALUE0 {
-                            r#type: FWP_V6_ADDR_MASK,
-                            Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
-                                v6AddrMask: &mask as *const _ as *mut _,
-                            },
-                        },
-                    });
-                }
-            }
+        // Condition: REMOTE_IP (IPv6)
+        if let Some(ref mask) = remote_v6_mask {
+            conditions.push(FWPM_FILTER_CONDITION0 {
+                fieldKey: CONDITION_IP_REMOTE_ADDRESS,
+                matchType: FWP_MATCH_EQUAL,
+                conditionValue: FWP_CONDITION_VALUE0 {
+                    r#type: FWP_V6_ADDR_MASK,
+                    Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
+                        v6AddrMask: mask as *const _ as *mut _,
+                    },
+                },
+            });
         }
 
-        Ok(conditions)
-    }
+        // Condition: LOCAL_IP (IPv4)
+        if let Some(ref mask) = local_v4_mask {
+            conditions.push(FWPM_FILTER_CONDITION0 {
+                fieldKey: CONDITION_IP_LOCAL_ADDRESS,
+                matchType: FWP_MATCH_EQUAL,
+                conditionValue: FWP_CONDITION_VALUE0 {
+                    r#type: FWP_V4_ADDR_MASK,
+                    Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
+                        v4AddrMask: mask as *const _ as *mut _,
+                    },
+                },
+            });
+        }
 
-    /// Add filter to WFP engine
-    ///
-    /// Translates RuleDef and adds it to WFP within a transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns `WfpError::FilterAddFailed` if the filter cannot be added.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use trusty_wfp::{WfpEngine, FilterBuilder, initialize_wfp};
-    /// use trusty_domain::RuleDef;
-    ///
-    /// let engine = WfpEngine::new()?;
-    /// initialize_wfp(&engine)?;
-    ///
-    /// let rule = RuleDef::allow_outbound();
-    /// let filter_id = FilterBuilder::add_filter(&engine, &rule)?;
-    /// # Ok::<(), trusty_wfp::WfpError>(())
-    /// ```
-    pub fn add_filter(engine: &WfpEngine, rule: &RuleDef) -> WfpResult<u64> {
-        // Determine if rule uses IPv6 (based on remote_ip if present)
-        let is_ipv6 = rule.remote_ip.as_ref()
-            .map(|ip_mask| matches!(ip_mask.addr, IpAddr::V6(_)))
-            .unwrap_or(false);
+        // Condition: LOCAL_IP (IPv6)
+        if let Some(ref mask) = local_v6_mask {
+            conditions.push(FWPM_FILTER_CONDITION0 {
+                fieldKey: CONDITION_IP_LOCAL_ADDRESS,
+                matchType: FWP_MATCH_EQUAL,
+                conditionValue: FWP_CONDITION_VALUE0 {
+                    r#type: FWP_V6_ADDR_MASK,
+                    Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
+                        v6AddrMask: mask as *const _ as *mut _,
+                    },
+                },
+            });
+        }
 
-        let layer_key = Self::select_layer(rule.direction, is_ipv6);
-        let action = Self::translate_action(rule.action);
-        let conditions = Self::build_conditions(rule)?;
-
-        // Convert name to wide string
-        let name_wide: Vec<u16> = rule.name.encode_utf16().chain(std::iter::once(0)).collect();
-
+        // Create the filter structure
         let filter = FWPM_FILTER0 {
             filterKey: GUID::zeroed(), // Let WFP generate GUID
             displayData: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_DISPLAY_DATA0 {
@@ -267,9 +344,9 @@ impl FilterBuilder {
             layerKey: layer_key,
             subLayerKey: TRUSTY_SUBLAYER_GUID,
             weight: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_VALUE0 {
-                r#type: FWP_UINT8,
+                r#type: FWP_UINT64,
                 Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_VALUE0_0 {
-                    uint8: (rule.weight / 1_000_000) as u8, // Normalize weight
+                    uint64: &weight_value as *const u64 as *mut u64, // TinyWall approach: store millions directly
                 },
             },
             numFilterConditions: conditions.len() as u32,
@@ -292,6 +369,13 @@ impl FilterBuilder {
 
         unsafe {
             let result = FwpmFilterAdd0(engine.handle(), &filter, None, Some(&mut filter_id));
+
+            // Free memory allocated by FwpmGetAppIdFromFileName0 regardless of add result
+            if let Some((mut blob_ptr, needs_free)) = app_id_blob {
+                if needs_free && !blob_ptr.is_null() {
+                    FwpmFreeMemory0(&mut blob_ptr as *mut _ as *mut *mut _);
+                }
+            }
 
             if result != ERROR_SUCCESS.0 {
                 return Err(WfpError::FilterAddFailed(format!(

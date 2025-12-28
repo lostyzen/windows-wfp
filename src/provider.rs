@@ -118,7 +118,7 @@ impl WfpSublayer {
                 size: 0,
                 data: ptr::null_mut(),
             },
-            weight: 0x100, // Default weight - filters in this sublayer have medium priority
+            weight: 0xFFFF, // Maximum weight - highest priority for TRusTY Wall filters
         };
 
         unsafe {
