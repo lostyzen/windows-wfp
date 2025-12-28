@@ -6,9 +6,9 @@ use crate::constants::*;
 use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FwpmFilterAdd0, FWPM_FILTER0, FWPM_FILTER_CONDITION0, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT,
-    FWP_CONDITION_VALUE0, FWP_MATCH_EQUAL, FWP_UINT16, FWP_UINT8,
-    FWP_ACTION_TYPE, FWPM_FILTER_FLAGS, FWP_BYTE_BLOB_TYPE,
+    FwpmFilterAdd0, FwpmFilterDeleteById0, FWPM_FILTER0, FWPM_FILTER_CONDITION0,
+    FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_CONDITION_VALUE0, FWP_MATCH_EQUAL,
+    FWP_UINT16, FWP_UINT8, FWP_ACTION_TYPE, FWPM_FILTER_FLAGS, FWP_BYTE_BLOB_TYPE,
 };
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::core::{GUID, PWSTR};
@@ -212,6 +212,45 @@ impl FilterBuilder {
 
         Ok(filter_id)
     }
+
+    /// Delete filter from WFP engine by ID
+    ///
+    /// Removes a previously added filter using its unique ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns `WfpError::FilterDeleteFailed` if the filter cannot be deleted.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use trusty_wfp::{WfpEngine, FilterBuilder, initialize_wfp};
+    /// use trusty_domain::RuleDef;
+    ///
+    /// let engine = WfpEngine::new()?;
+    /// initialize_wfp(&engine)?;
+    ///
+    /// let rule = RuleDef::allow_outbound();
+    /// let filter_id = FilterBuilder::add_filter(&engine, &rule)?;
+    ///
+    /// // Later: remove the filter
+    /// FilterBuilder::delete_filter(&engine, filter_id)?;
+    /// # Ok::<(), trusty_wfp::WfpError>(())
+    /// ```
+    pub fn delete_filter(engine: &WfpEngine, filter_id: u64) -> WfpResult<()> {
+        unsafe {
+            let result = FwpmFilterDeleteById0(engine.handle(), filter_id);
+
+            if result != ERROR_SUCCESS.0 {
+                return Err(WfpError::FilterDeleteFailed(format!(
+                    "Failed to delete filter ID {}: error code {}",
+                    filter_id, result
+                )));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -263,5 +302,23 @@ mod tests {
         let result = FilterBuilder::add_filter(&engine, &rule);
 
         assert!(result.is_ok(), "Failed to add filter: {:?}", result);
+    }
+
+    #[test]
+    #[ignore] // Requires admin privileges
+    fn test_add_and_delete_filter() {
+        let engine = WfpEngine::new().expect("Failed to create engine");
+        crate::initialize_wfp(&engine).expect("Failed to initialize WFP");
+
+        let rule = RuleDef::allow_outbound();
+
+        // Add filter
+        let filter_id = FilterBuilder::add_filter(&engine, &rule)
+            .expect("Failed to add filter");
+
+        // Delete filter
+        let result = FilterBuilder::delete_filter(&engine, filter_id);
+
+        assert!(result.is_ok(), "Failed to delete filter: {:?}", result);
     }
 }
