@@ -10,6 +10,7 @@ license.workspace = true
 windows = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+trusty-domain = { path = "../trusty-domain" }
 
 [build-dependencies]
 windows = { workspace = true }
