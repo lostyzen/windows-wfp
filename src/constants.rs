@@ -34,6 +34,26 @@ pub const LAYER_ALE_AUTH_RECV_ACCEPT_V4: GUID = GUID::from_u128(0xe1cd9fe7_f4b5_
 /// Application Layer Enforcement (ALE) for IPv6 inbound connections.
 pub const LAYER_ALE_AUTH_RECV_ACCEPT_V6: GUID = GUID::from_u128(0xa3b42c97_9f04_4672_b87e_cee9c483257f);
 
+/// WFP Layer: FWPM_LAYER_ALE_AUTH_LISTEN_V4
+///
+/// Application Layer Enforcement (ALE) for IPv4 listen/bind operations.
+pub const LAYER_ALE_AUTH_LISTEN_V4: GUID = GUID::from_u128(0x88bb5dad_76d7_4227_9c71_df0a3ed7be7e);
+
+/// WFP Layer: FWPM_LAYER_ALE_AUTH_LISTEN_V6
+///
+/// Application Layer Enforcement (ALE) for IPv6 listen/bind operations.
+pub const LAYER_ALE_AUTH_LISTEN_V6: GUID = GUID::from_u128(0x7ac9de24_17dd_4814_b4bd_a9fbc95a321b);
+
+/// WFP Layer: FWPM_LAYER_ALE_RESOURCE_ASSIGNMENT_V4
+///
+/// Application Layer Enforcement (ALE) for IPv4 resource assignment.
+pub const LAYER_ALE_RESOURCE_ASSIGNMENT_V4: GUID = GUID::from_u128(0x1247d66d_0b60_4a15_8d44_7155d0f53a0c);
+
+/// WFP Layer: FWPM_LAYER_ALE_RESOURCE_ASSIGNMENT_V6
+///
+/// Application Layer Enforcement (ALE) for IPv6 resource assignment.
+pub const LAYER_ALE_RESOURCE_ASSIGNMENT_V6: GUID = GUID::from_u128(0x55a650e1_5f0a_4eca_a653_88f53b26aa8c);
+
 /// WFP Condition: FWPM_CONDITION_ALE_APP_ID
 ///
 /// Filter condition for application path.
