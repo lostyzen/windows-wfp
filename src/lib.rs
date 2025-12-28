@@ -12,7 +12,8 @@ pub mod safe_handles;
 pub mod errors;
 
 // Re-exports
-// pub use engine::WfpEngine;
+pub use engine::WfpEngine;
+pub use transaction::WfpTransaction;
 // pub use filter::Filter;
 pub use errors::{WfpError, WfpResult};
 pub use constants::*;
