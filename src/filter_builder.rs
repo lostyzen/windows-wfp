@@ -377,9 +377,14 @@ mod tests {
 
     #[test]
     fn test_protocol_translation() {
+        assert_eq!(FilterBuilder::translate_protocol(Protocol::Hopopt), 0);
+        assert_eq!(FilterBuilder::translate_protocol(Protocol::Icmp), 1);
+        assert_eq!(FilterBuilder::translate_protocol(Protocol::Igmp), 2);
         assert_eq!(FilterBuilder::translate_protocol(Protocol::Tcp), 6);
         assert_eq!(FilterBuilder::translate_protocol(Protocol::Udp), 17);
-        assert_eq!(FilterBuilder::translate_protocol(Protocol::Icmp), 1);
+        assert_eq!(FilterBuilder::translate_protocol(Protocol::Gre), 47);
+        assert_eq!(FilterBuilder::translate_protocol(Protocol::Esp), 50);
+        assert_eq!(FilterBuilder::translate_protocol(Protocol::Ah), 51);
         assert_eq!(FilterBuilder::translate_protocol(Protocol::Icmpv6), 58);
     }
 
