@@ -9,6 +9,7 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmFilterAdd0, FwpmFilterDeleteById0, FWPM_FILTER0, FWPM_FILTER_CONDITION0,
     FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_CONDITION_VALUE0, FWP_MATCH_EQUAL,
     FWP_UINT16, FWP_UINT8, FWP_ACTION_TYPE, FWPM_FILTER_FLAGS, FWP_BYTE_BLOB_TYPE,
+    FWP_V4_ADDR_AND_MASK, FWP_V6_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_V6_ADDR_MASK,
 };
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::core::{GUID, PWSTR};
@@ -47,6 +48,19 @@ impl FilterBuilder {
     /// Translate Protocol to IP protocol number
     fn translate_protocol(protocol: Protocol) -> u8 {
         protocol as u8 // Already has correct values: Tcp=6, Udp=17, Icmp=1, Icmpv6=58
+    }
+
+    /// Convert CIDR prefix length to IPv4 netmask
+    ///
+    /// Example: prefix_len=24 → 0xFFFFFF00 (255.255.255.0)
+    fn prefix_to_v4_mask(prefix_len: u8) -> u32 {
+        if prefix_len == 0 {
+            0
+        } else if prefix_len >= 32 {
+            0xFFFFFFFF
+        } else {
+            u32::MAX << (32 - prefix_len)
+        }
     }
 
     /// Build filter conditions from RuleDef
@@ -121,8 +135,85 @@ impl FilterBuilder {
             });
         }
 
-        // Condition: REMOTE_IP (TODO: implement IP address conditions)
-        // This requires FWP_V4_ADDR_MASK or FWP_V6_ADDR_MASK structures
+        // Condition: REMOTE_IP
+        if let Some(ref remote_ip) = rule.remote_ip {
+            match remote_ip.addr {
+                IpAddr::V4(ipv4) => {
+                    let mask = FWP_V4_ADDR_AND_MASK {
+                        addr: u32::from_be_bytes(ipv4.octets()),
+                        mask: Self::prefix_to_v4_mask(remote_ip.prefix_len),
+                    };
+
+                    conditions.push(FWPM_FILTER_CONDITION0 {
+                        fieldKey: CONDITION_IP_REMOTE_ADDRESS,
+                        matchType: FWP_MATCH_EQUAL,
+                        conditionValue: FWP_CONDITION_VALUE0 {
+                            r#type: FWP_V4_ADDR_MASK,
+                            Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
+                                v4AddrMask: &mask as *const _ as *mut _,
+                            },
+                        },
+                    });
+                }
+                IpAddr::V6(ipv6) => {
+                    let mask = FWP_V6_ADDR_AND_MASK {
+                        addr: ipv6.octets(),
+                        prefixLength: remote_ip.prefix_len,
+                    };
+
+                    conditions.push(FWPM_FILTER_CONDITION0 {
+                        fieldKey: CONDITION_IP_REMOTE_ADDRESS,
+                        matchType: FWP_MATCH_EQUAL,
+                        conditionValue: FWP_CONDITION_VALUE0 {
+                            r#type: FWP_V6_ADDR_MASK,
+                            Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
+                                v6AddrMask: &mask as *const _ as *mut _,
+                            },
+                        },
+                    });
+                }
+            }
+        }
+
+        // Condition: LOCAL_IP
+        if let Some(ref local_ip) = rule.local_ip {
+            match local_ip.addr {
+                IpAddr::V4(ipv4) => {
+                    let mask = FWP_V4_ADDR_AND_MASK {
+                        addr: u32::from_be_bytes(ipv4.octets()),
+                        mask: Self::prefix_to_v4_mask(local_ip.prefix_len),
+                    };
+
+                    conditions.push(FWPM_FILTER_CONDITION0 {
+                        fieldKey: CONDITION_IP_LOCAL_ADDRESS,
+                        matchType: FWP_MATCH_EQUAL,
+                        conditionValue: FWP_CONDITION_VALUE0 {
+                            r#type: FWP_V4_ADDR_MASK,
+                            Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
+                                v4AddrMask: &mask as *const _ as *mut _,
+                            },
+                        },
+                    });
+                }
+                IpAddr::V6(ipv6) => {
+                    let mask = FWP_V6_ADDR_AND_MASK {
+                        addr: ipv6.octets(),
+                        prefixLength: local_ip.prefix_len,
+                    };
+
+                    conditions.push(FWPM_FILTER_CONDITION0 {
+                        fieldKey: CONDITION_IP_LOCAL_ADDRESS,
+                        matchType: FWP_MATCH_EQUAL,
+                        conditionValue: FWP_CONDITION_VALUE0 {
+                            r#type: FWP_V6_ADDR_MASK,
+                            Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
+                                v6AddrMask: &mask as *const _ as *mut _,
+                            },
+                        },
+                    });
+                }
+            }
+        }
 
         Ok(conditions)
     }
@@ -290,6 +381,15 @@ mod tests {
         assert_eq!(FilterBuilder::translate_protocol(Protocol::Udp), 17);
         assert_eq!(FilterBuilder::translate_protocol(Protocol::Icmp), 1);
         assert_eq!(FilterBuilder::translate_protocol(Protocol::Icmpv6), 58);
+    }
+
+    #[test]
+    fn test_prefix_to_v4_mask() {
+        assert_eq!(FilterBuilder::prefix_to_v4_mask(0), 0x00000000);
+        assert_eq!(FilterBuilder::prefix_to_v4_mask(8), 0xFF000000);
+        assert_eq!(FilterBuilder::prefix_to_v4_mask(16), 0xFFFF0000);
+        assert_eq!(FilterBuilder::prefix_to_v4_mask(24), 0xFFFFFF00);
+        assert_eq!(FilterBuilder::prefix_to_v4_mask(32), 0xFFFFFFFF);
     }
 
     #[test]

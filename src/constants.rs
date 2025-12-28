@@ -44,6 +44,11 @@ pub const CONDITION_ALE_APP_ID: GUID = GUID::from_u128(0xd78e1e87_8644_4ea5_9437
 /// Filter condition for remote IP address.
 pub const CONDITION_IP_REMOTE_ADDRESS: GUID = GUID::from_u128(0xb235ae9a_1d64_49b8_a44c_5ff3d9095045);
 
+/// WFP Condition: FWPM_CONDITION_IP_LOCAL_ADDRESS
+///
+/// Filter condition for local IP address.
+pub const CONDITION_IP_LOCAL_ADDRESS: GUID = GUID::from_u128(0xd9ee6ea3_c79a_4de1_b0b5_68e3c8c59e8e);
+
 /// WFP Condition: FWPM_CONDITION_IP_REMOTE_PORT
 ///
 /// Filter condition for remote port.
