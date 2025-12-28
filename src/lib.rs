@@ -2,6 +2,7 @@
 //!
 //! Safe Rust wrapper around Windows Filtering Platform APIs.
 
+pub mod constants;
 pub mod engine;
 pub mod filter;
 pub mod transaction;
@@ -14,3 +15,4 @@ pub mod errors;
 // pub use engine::WfpEngine;
 // pub use filter::Filter;
 pub use errors::{WfpError, WfpResult};
+pub use constants::*;
