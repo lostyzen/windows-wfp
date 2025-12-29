@@ -3,12 +3,12 @@
 //! Provides safe Rust wrapper around WFP engine session.
 
 use crate::errors::{WfpError, WfpResult};
+use std::ptr;
+use windows::core::{PCWSTR, PWSTR};
+use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmEngineClose0, FwpmEngineOpen0, FWPM_SESSION0, FWPM_SESSION_FLAG_DYNAMIC,
 };
-use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
-use windows::core::{PCWSTR, PWSTR};
-use std::ptr;
 
 /// WFP Engine session with RAII handle management
 ///
@@ -169,9 +169,9 @@ mod tests {
         // Useful for CI/CD without admin rights
         let result = WfpEngine::new();
 
-        if result.is_err() {
+        if let Err(err) = result {
             // Expected when not running as admin
-            match result.unwrap_err() {
+            match err {
                 WfpError::InsufficientPermissions => (),
                 WfpError::ServiceNotAvailable => (),
                 WfpError::EngineOpenFailed => (),

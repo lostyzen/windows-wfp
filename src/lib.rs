@@ -116,24 +116,24 @@
 //! - Memory allocated by WFP is properly freed with `FwpmFreeMemory0`
 //! - Wide string conversions are handled safely
 
+pub mod condition;
 pub mod constants;
 pub mod engine;
-pub mod filter;
-pub mod transaction;
-pub mod layer;
-pub mod condition;
-pub mod safe_handles;
 pub mod errors;
-pub mod provider;
-pub mod filter_builder;
 pub mod events;
+pub mod filter;
+pub mod filter_builder;
+pub mod layer;
+pub mod provider;
+pub mod safe_handles;
+pub mod transaction;
 
 // Re-exports
 pub use engine::WfpEngine;
-pub use transaction::WfpTransaction;
-pub use provider::{WfpProvider, WfpSublayer, initialize_wfp};
-pub use filter_builder::FilterBuilder;
 pub use events::{NetworkEvent, NetworkEventType, WfpEventSubscription};
+pub use filter_builder::FilterBuilder;
+pub use provider::{initialize_wfp, WfpProvider, WfpSublayer};
+pub use transaction::WfpTransaction;
 // pub use filter::Filter;
-pub use errors::{WfpError, WfpResult};
 pub use constants::*;
+pub use errors::{WfpError, WfpResult};

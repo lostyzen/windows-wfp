@@ -30,21 +30,20 @@
 use crate::constants::*;
 use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
-use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FwpmFilterAdd0, FwpmFilterDeleteById0, FwpmGetAppIdFromFileName0, FwpmFreeMemory0,
-    FWPM_FILTER0, FWPM_FILTER_CONDITION0,
-    FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_CONDITION_VALUE0, FWP_MATCH_EQUAL,
-    FWP_UINT16, FWP_UINT8, FWP_UINT64, FWP_ACTION_TYPE, FWPM_FILTER_FLAGS, FWP_BYTE_BLOB_TYPE,
-    FWP_V4_ADDR_AND_MASK, FWP_V6_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_V6_ADDR_MASK,
-    FWP_BYTE_BLOB,
-};
-use windows::Win32::Foundation::ERROR_SUCCESS;
-use windows::core::{GUID, PWSTR};
 use std::net::IpAddr;
 use std::ptr;
+use windows::core::{GUID, PWSTR};
+use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
+    FwpmFilterAdd0, FwpmFilterDeleteById0, FwpmFreeMemory0, FwpmGetAppIdFromFileName0,
+    FWPM_FILTER0, FWPM_FILTER_CONDITION0, FWPM_FILTER_FLAGS, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT,
+    FWP_ACTION_TYPE, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0, FWP_MATCH_EQUAL,
+    FWP_UINT16, FWP_UINT64, FWP_UINT8, FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK,
+    FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK,
+};
 
 // Import domain types
-use trusty_domain::{RuleDef, Direction, RuleAction, Protocol};
+use trusty_domain::{Direction, Protocol, RuleAction, RuleDef};
 
 /// WFP Filter builder
 ///
@@ -113,7 +112,9 @@ impl FilterBuilder {
     /// ```
     pub fn add_filter(engine: &WfpEngine, rule: &RuleDef) -> WfpResult<u64> {
         // Determine if rule uses IPv6 (based on remote_ip if present)
-        let is_ipv6 = rule.remote_ip.as_ref()
+        let is_ipv6 = rule
+            .remote_ip
+            .as_ref()
             .map(|ip_mask| matches!(ip_mask.addr, IpAddr::V6(_)))
             .unwrap_or(false);
 
@@ -148,70 +149,76 @@ impl FilterBuilder {
         // FwpmGetAppIdFromFileName0 performs the conversion and returns a FWP_BYTE_BLOB
         // containing the NT kernel path as a wide string. This blob must be freed with
         // FwpmFreeMemory0 after the filter is added.
-        let app_id_blob: Option<(*mut FWP_BYTE_BLOB, bool)> = rule.app_path.as_ref().and_then(|app_path| {
-            unsafe {
-                let path_str = app_path.to_string_lossy().to_string();
-                let path_wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
-                let pwstr = PWSTR(path_wide.as_ptr() as *mut u16);
+        let app_id_blob: Option<(*mut FWP_BYTE_BLOB, bool)> =
+            rule.app_path.as_ref().and_then(|app_path| {
+                unsafe {
+                    let path_str = app_path.to_string_lossy().to_string();
+                    let path_wide: Vec<u16> =
+                        path_str.encode_utf16().chain(std::iter::once(0)).collect();
+                    let pwstr = PWSTR(path_wide.as_ptr() as *mut u16);
 
-                let mut blob_ptr: *mut FWP_BYTE_BLOB = ptr::null_mut();
-                let result = FwpmGetAppIdFromFileName0(pwstr, &mut blob_ptr);
+                    let mut blob_ptr: *mut FWP_BYTE_BLOB = ptr::null_mut();
+                    let result = FwpmGetAppIdFromFileName0(pwstr, &mut blob_ptr);
 
-                if result == ERROR_SUCCESS.0 {
-                    // Successfully converted DOS path to NT kernel format
-                    // The blob_ptr now points to WFP-allocated memory containing the NT path
-                    Some((blob_ptr, true)) // true = needs FwpmFreeMemory0 cleanup
+                    if result == ERROR_SUCCESS.0 {
+                        // Successfully converted DOS path to NT kernel format
+                        // The blob_ptr now points to WFP-allocated memory containing the NT path
+                        Some((blob_ptr, true)) // true = needs FwpmFreeMemory0 cleanup
+                    } else {
+                        // Conversion failed - file may not exist or path is invalid
+                        // Return None to skip APP_ID condition entirely
+                        None
+                    }
+                }
+            });
+
+        let remote_v4_mask: Option<FWP_V4_ADDR_AND_MASK> =
+            rule.remote_ip.as_ref().and_then(|remote_ip| {
+                if let IpAddr::V4(ipv4) = remote_ip.addr {
+                    Some(FWP_V4_ADDR_AND_MASK {
+                        addr: u32::from_be_bytes(ipv4.octets()),
+                        mask: Self::prefix_to_v4_mask(remote_ip.prefix_len),
+                    })
                 } else {
-                    // Conversion failed - file may not exist or path is invalid
-                    // Return None to skip APP_ID condition entirely
                     None
                 }
-            }
-        });
+            });
 
-        let remote_v4_mask: Option<FWP_V4_ADDR_AND_MASK> = rule.remote_ip.as_ref().and_then(|remote_ip| {
-            if let IpAddr::V4(ipv4) = remote_ip.addr {
-                Some(FWP_V4_ADDR_AND_MASK {
-                    addr: u32::from_be_bytes(ipv4.octets()),
-                    mask: Self::prefix_to_v4_mask(remote_ip.prefix_len),
-                })
-            } else {
-                None
-            }
-        });
+        let remote_v6_mask: Option<FWP_V6_ADDR_AND_MASK> =
+            rule.remote_ip.as_ref().and_then(|remote_ip| {
+                if let IpAddr::V6(ipv6) = remote_ip.addr {
+                    Some(FWP_V6_ADDR_AND_MASK {
+                        addr: ipv6.octets(),
+                        prefixLength: remote_ip.prefix_len,
+                    })
+                } else {
+                    None
+                }
+            });
 
-        let remote_v6_mask: Option<FWP_V6_ADDR_AND_MASK> = rule.remote_ip.as_ref().and_then(|remote_ip| {
-            if let IpAddr::V6(ipv6) = remote_ip.addr {
-                Some(FWP_V6_ADDR_AND_MASK {
-                    addr: ipv6.octets(),
-                    prefixLength: remote_ip.prefix_len,
-                })
-            } else {
-                None
-            }
-        });
+        let local_v4_mask: Option<FWP_V4_ADDR_AND_MASK> =
+            rule.local_ip.as_ref().and_then(|local_ip| {
+                if let IpAddr::V4(ipv4) = local_ip.addr {
+                    Some(FWP_V4_ADDR_AND_MASK {
+                        addr: u32::from_be_bytes(ipv4.octets()),
+                        mask: Self::prefix_to_v4_mask(local_ip.prefix_len),
+                    })
+                } else {
+                    None
+                }
+            });
 
-        let local_v4_mask: Option<FWP_V4_ADDR_AND_MASK> = rule.local_ip.as_ref().and_then(|local_ip| {
-            if let IpAddr::V4(ipv4) = local_ip.addr {
-                Some(FWP_V4_ADDR_AND_MASK {
-                    addr: u32::from_be_bytes(ipv4.octets()),
-                    mask: Self::prefix_to_v4_mask(local_ip.prefix_len),
-                })
-            } else {
-                None
-            }
-        });
-
-        let local_v6_mask: Option<FWP_V6_ADDR_AND_MASK> = rule.local_ip.as_ref().and_then(|local_ip| {
-            if let IpAddr::V6(ipv6) = local_ip.addr {
-                Some(FWP_V6_ADDR_AND_MASK {
-                    addr: ipv6.octets(),
-                    prefixLength: local_ip.prefix_len,
-                })
-            } else {
-                None
-            }
-        });
+        let local_v6_mask: Option<FWP_V6_ADDR_AND_MASK> =
+            rule.local_ip.as_ref().and_then(|local_ip| {
+                if let IpAddr::V6(ipv6) = local_ip.addr {
+                    Some(FWP_V6_ADDR_AND_MASK {
+                        addr: ipv6.octets(),
+                        prefixLength: local_ip.prefix_len,
+                    })
+                } else {
+                    None
+                }
+            });
 
         // Build conditions - now all data is stored above and will outlive this call
         let mut conditions = Vec::new();
@@ -331,23 +338,26 @@ impl FilterBuilder {
         // Create the filter structure
         let filter = FWPM_FILTER0 {
             filterKey: GUID::zeroed(), // Let WFP generate GUID
-            displayData: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_DISPLAY_DATA0 {
-                name: PWSTR(name_wide.as_ptr() as *mut u16),
-                description: PWSTR::null(),
-            },
+            displayData:
+                windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_DISPLAY_DATA0 {
+                    name: PWSTR(name_wide.as_ptr() as *mut u16),
+                    description: PWSTR::null(),
+                },
             flags: FWPM_FILTER_FLAGS(0),
             providerKey: &TRUSTY_PROVIDER_GUID as *const _ as *mut _,
-            providerData: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_BYTE_BLOB {
-                size: 0,
-                data: ptr::null_mut(),
-            },
+            providerData:
+                windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_BYTE_BLOB {
+                    size: 0,
+                    data: ptr::null_mut(),
+                },
             layerKey: layer_key,
             subLayerKey: TRUSTY_SUBLAYER_GUID,
             weight: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_VALUE0 {
                 r#type: FWP_UINT64,
-                Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_VALUE0_0 {
-                    uint64: &weight_value as *const u64 as *mut u64, // TinyWall approach: store millions directly
-                },
+                Anonymous:
+                    windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_VALUE0_0 {
+                        uint64: &weight_value as *const u64 as *mut u64, // TinyWall approach: store millions directly
+                    },
             },
             numFilterConditions: conditions.len() as u32,
             filterCondition: if conditions.is_empty() {
@@ -455,8 +465,14 @@ mod tests {
 
     #[test]
     fn test_action_translation() {
-        assert_eq!(FilterBuilder::translate_action(RuleAction::Allow), FWP_ACTION_PERMIT);
-        assert_eq!(FilterBuilder::translate_action(RuleAction::Block), FWP_ACTION_BLOCK);
+        assert_eq!(
+            FilterBuilder::translate_action(RuleAction::Allow),
+            FWP_ACTION_PERMIT
+        );
+        assert_eq!(
+            FilterBuilder::translate_action(RuleAction::Block),
+            FWP_ACTION_BLOCK
+        );
     }
 
     #[test]
@@ -502,8 +518,7 @@ mod tests {
         let rule = RuleDef::allow_outbound();
 
         // Add filter
-        let filter_id = FilterBuilder::add_filter(&engine, &rule)
-            .expect("Failed to add filter");
+        let filter_id = FilterBuilder::add_filter(&engine, &rule).expect("Failed to add filter");
 
         // Delete filter
         let result = FilterBuilder::delete_filter(&engine, filter_id);

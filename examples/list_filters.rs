@@ -11,13 +11,12 @@
 //! cargo run --example list_filters --release
 //! ```
 
-use trusty_wfp::{WfpEngine, WfpResult};
-use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FwpmFilterEnum0, FwpmFilterCreateEnumHandle0, FwpmFilterDestroyEnumHandle0,
-    FWPM_FILTER0,
-};
-use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
 use std::ptr;
+use trusty_wfp::{WfpEngine, WfpResult};
+use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
+use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
+    FwpmFilterCreateEnumHandle0, FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0, FWPM_FILTER0,
+};
 
 fn main() -> WfpResult<()> {
     println!("🔍 TRusTY Wall - WFP Filter Enumeration\n");
@@ -39,14 +38,20 @@ fn main() -> WfpResult<()> {
         );
 
         if result != ERROR_SUCCESS.0 {
-            eprintln!("Failed to create enum handle: error {} (0x{:X})", result, result);
+            eprintln!(
+                "Failed to create enum handle: error {} (0x{:X})",
+                result, result
+            );
             return Ok(());
         }
     }
 
     println!("📋 Enumerating WFP filters...\n");
     println!("{:-<180}", "");
-    println!("{:<10} {:<40} {:<15} {:<15} {:<15} {:<60}", "Filter ID", "Name", "Action", "Provider", "Weight", "App Path");
+    println!(
+        "{:<10} {:<40} {:<15} {:<15} {:<15} {:<60}",
+        "Filter ID", "Name", "Action", "Provider", "Weight", "App Path"
+    );
     println!("{:-<180}", "");
 
     let mut total_filters = 0;
@@ -82,7 +87,11 @@ fn main() -> WfpResult<()> {
 
                 // Get filter name
                 let name = if !filter.displayData.name.is_null() {
-                    filter.displayData.name.to_string().unwrap_or_else(|_| "Unknown".to_string())
+                    filter
+                        .displayData
+                        .name
+                        .to_string()
+                        .unwrap_or_else(|_| "Unknown".to_string())
                 } else {
                     "Unknown".to_string()
                 };
@@ -110,7 +119,9 @@ fn main() -> WfpResult<()> {
                 };
 
                 // Check if it's our filter
-                let is_trusty = name.contains("TRusTY") || name.contains("Block curl") || name.contains("Block Notepad");
+                let is_trusty = name.contains("TRusTY")
+                    || name.contains("Block curl")
+                    || name.contains("Block Notepad");
                 if is_trusty {
                     trusty_filters += 1;
                 }
@@ -142,8 +153,13 @@ fn main() -> WfpResult<()> {
                 };
 
                 // Extract APP_ID (application path) from filter conditions
-                let app_path = if filter.numFilterConditions > 0 && !filter.filterCondition.is_null() {
-                    let conditions = std::slice::from_raw_parts(filter.filterCondition, filter.numFilterConditions as usize);
+                let app_path = if filter.numFilterConditions > 0
+                    && !filter.filterCondition.is_null()
+                {
+                    let conditions = std::slice::from_raw_parts(
+                        filter.filterCondition,
+                        filter.numFilterConditions as usize,
+                    );
 
                     // Look for FWPM_CONDITION_ALE_APP_ID
                     conditions.iter()
@@ -172,7 +188,7 @@ fn main() -> WfpResult<()> {
                                 None
                             }
                         })
-                        .unwrap_or_else(|| String::new())
+                        .unwrap_or_else(String::new)
                 } else {
                     String::new()
                 };
@@ -189,22 +205,14 @@ fn main() -> WfpResult<()> {
 
                 // Highlight our filters
                 if is_trusty {
-                    println!("\x1b[32m{:<10} {:<40} {:<15} {:<15} {:<15} {:<60}\x1b[0m",
-                        filter.filterId,
-                        display_name,
-                        action,
-                        provider,
-                        weight,
-                        display_path
+                    println!(
+                        "\x1b[32m{:<10} {:<40} {:<15} {:<15} {:<15} {:<60}\x1b[0m",
+                        filter.filterId, display_name, action, provider, weight, display_path
                     );
                 } else {
-                    println!("{:<10} {:<40} {:<15} {:<15} {:<15} {:<60}",
-                        filter.filterId,
-                        display_name,
-                        action,
-                        provider,
-                        weight,
-                        display_path
+                    println!(
+                        "{:<10} {:<40} {:<15} {:<15} {:<15} {:<60}",
+                        filter.filterId, display_name, action, provider, weight, display_path
                     );
                 }
 
@@ -214,7 +222,7 @@ fn main() -> WfpResult<()> {
             // Free the returned array - FwpmFreeMemory0 expects void**
             if !filters.is_null() {
                 windows::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmFreeMemory0(
-                    &mut filters as *mut _ as *mut *mut _
+                    &mut filters as *mut _ as *mut *mut _,
                 );
             }
         }

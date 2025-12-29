@@ -27,12 +27,14 @@ pub const LAYER_ALE_AUTH_CONNECT_V6: GUID = GUID::from_u128(0x4a72393b_319f_44bc
 /// WFP Layer: FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4
 ///
 /// Application Layer Enforcement (ALE) for IPv4 inbound connections.
-pub const LAYER_ALE_AUTH_RECV_ACCEPT_V4: GUID = GUID::from_u128(0xe1cd9fe7_f4b5_4273_96c0_592695c5f7b8);
+pub const LAYER_ALE_AUTH_RECV_ACCEPT_V4: GUID =
+    GUID::from_u128(0xe1cd9fe7_f4b5_4273_96c0_592695c5f7b8);
 
 /// WFP Layer: FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6
 ///
 /// Application Layer Enforcement (ALE) for IPv6 inbound connections.
-pub const LAYER_ALE_AUTH_RECV_ACCEPT_V6: GUID = GUID::from_u128(0xa3b42c97_9f04_4672_b87e_cee9c483257f);
+pub const LAYER_ALE_AUTH_RECV_ACCEPT_V6: GUID =
+    GUID::from_u128(0xa3b42c97_9f04_4672_b87e_cee9c483257f);
 
 /// WFP Layer: FWPM_LAYER_ALE_AUTH_LISTEN_V4
 ///
@@ -47,12 +49,14 @@ pub const LAYER_ALE_AUTH_LISTEN_V6: GUID = GUID::from_u128(0x7ac9de24_17dd_4814_
 /// WFP Layer: FWPM_LAYER_ALE_RESOURCE_ASSIGNMENT_V4
 ///
 /// Application Layer Enforcement (ALE) for IPv4 resource assignment.
-pub const LAYER_ALE_RESOURCE_ASSIGNMENT_V4: GUID = GUID::from_u128(0x1247d66d_0b60_4a15_8d44_7155d0f53a0c);
+pub const LAYER_ALE_RESOURCE_ASSIGNMENT_V4: GUID =
+    GUID::from_u128(0x1247d66d_0b60_4a15_8d44_7155d0f53a0c);
 
 /// WFP Layer: FWPM_LAYER_ALE_RESOURCE_ASSIGNMENT_V6
 ///
 /// Application Layer Enforcement (ALE) for IPv6 resource assignment.
-pub const LAYER_ALE_RESOURCE_ASSIGNMENT_V6: GUID = GUID::from_u128(0x55a650e1_5f0a_4eca_a653_88f53b26aa8c);
+pub const LAYER_ALE_RESOURCE_ASSIGNMENT_V6: GUID =
+    GUID::from_u128(0x55a650e1_5f0a_4eca_a653_88f53b26aa8c);
 
 /// WFP Condition: FWPM_CONDITION_ALE_APP_ID
 ///
@@ -62,12 +66,14 @@ pub const CONDITION_ALE_APP_ID: GUID = GUID::from_u128(0xd78e1e87_8644_4ea5_9437
 /// WFP Condition: FWPM_CONDITION_IP_REMOTE_ADDRESS
 ///
 /// Filter condition for remote IP address.
-pub const CONDITION_IP_REMOTE_ADDRESS: GUID = GUID::from_u128(0xb235ae9a_1d64_49b8_a44c_5ff3d9095045);
+pub const CONDITION_IP_REMOTE_ADDRESS: GUID =
+    GUID::from_u128(0xb235ae9a_1d64_49b8_a44c_5ff3d9095045);
 
 /// WFP Condition: FWPM_CONDITION_IP_LOCAL_ADDRESS
 ///
 /// Filter condition for local IP address.
-pub const CONDITION_IP_LOCAL_ADDRESS: GUID = GUID::from_u128(0xd9ee6ea3_c79a_4de1_b0b5_68e3c8c59e8e);
+pub const CONDITION_IP_LOCAL_ADDRESS: GUID =
+    GUID::from_u128(0xd9ee6ea3_c79a_4de1_b0b5_68e3c8c59e8e);
 
 /// WFP Condition: FWPM_CONDITION_IP_REMOTE_PORT
 ///

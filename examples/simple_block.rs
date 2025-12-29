@@ -17,8 +17,8 @@
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
-use trusty_wfp::{WfpEngine, FilterBuilder, WfpResult, initialize_wfp};
-use trusty_domain::{RuleDef, Direction, RuleAction, FilterWeight};
+use trusty_domain::{Direction, FilterWeight, RuleAction, RuleDef};
+use trusty_wfp::{initialize_wfp, FilterBuilder, WfpEngine, WfpResult};
 
 fn main() -> WfpResult<()> {
     println!("🔥 TRusTY Wall - Simple Block Demo\n");

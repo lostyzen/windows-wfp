@@ -6,12 +6,12 @@ use crate::constants::{TRUSTY_PROVIDER_GUID, TRUSTY_SUBLAYER_GUID};
 use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
 use crate::transaction::WfpTransaction;
+use std::ptr;
+use windows::core::PWSTR;
+use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmProviderAdd0, FwpmSubLayerAdd0, FWPM_PROVIDER0, FWPM_SUBLAYER0,
 };
-use windows::Win32::Foundation::ERROR_SUCCESS;
-use windows::core::PWSTR;
-use std::ptr;
 
 /// WFP Provider for TRusTY Wall
 ///
@@ -40,20 +40,28 @@ impl WfpProvider {
     /// ```
     pub fn register(engine: &WfpEngine) -> WfpResult<()> {
         // Keep wide strings alive for the duration of the function
-        let name_wide: Vec<u16> = "TRusTY Wall".encode_utf16().chain(std::iter::once(0)).collect();
-        let desc_wide: Vec<u16> = "TRusTY Wall Firewall Provider".encode_utf16().chain(std::iter::once(0)).collect();
+        let name_wide: Vec<u16> = "TRusTY Wall"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let desc_wide: Vec<u16> = "TRusTY Wall Firewall Provider"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
 
         let provider = FWPM_PROVIDER0 {
             providerKey: TRUSTY_PROVIDER_GUID,
-            displayData: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_DISPLAY_DATA0 {
-                name: PWSTR(name_wide.as_ptr() as *mut u16),
-                description: PWSTR(desc_wide.as_ptr() as *mut u16),
-            },
+            displayData:
+                windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_DISPLAY_DATA0 {
+                    name: PWSTR(name_wide.as_ptr() as *mut u16),
+                    description: PWSTR(desc_wide.as_ptr() as *mut u16),
+                },
             flags: 0,
-            providerData: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_BYTE_BLOB {
-                size: 0,
-                data: ptr::null_mut(),
-            },
+            providerData:
+                windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_BYTE_BLOB {
+                    size: 0,
+                    data: ptr::null_mut(),
+                },
             serviceName: PWSTR::null(),
         };
 
@@ -103,21 +111,29 @@ impl WfpSublayer {
     /// ```
     pub fn register(engine: &WfpEngine) -> WfpResult<()> {
         // Keep wide strings alive for the duration of the function
-        let name_wide: Vec<u16> = "TRusTY Wall Filters".encode_utf16().chain(std::iter::once(0)).collect();
-        let desc_wide: Vec<u16> = "Sublayer for TRusTY Wall firewall exception filters".encode_utf16().chain(std::iter::once(0)).collect();
+        let name_wide: Vec<u16> = "TRusTY Wall Filters"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let desc_wide: Vec<u16> = "Sublayer for TRusTY Wall firewall exception filters"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
 
         let sublayer = FWPM_SUBLAYER0 {
             subLayerKey: TRUSTY_SUBLAYER_GUID,
-            displayData: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_DISPLAY_DATA0 {
-                name: PWSTR(name_wide.as_ptr() as *mut u16),
-                description: PWSTR(desc_wide.as_ptr() as *mut u16),
-            },
+            displayData:
+                windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_DISPLAY_DATA0 {
+                    name: PWSTR(name_wide.as_ptr() as *mut u16),
+                    description: PWSTR(desc_wide.as_ptr() as *mut u16),
+                },
             flags: 0,
             providerKey: &TRUSTY_PROVIDER_GUID as *const _ as *mut _,
-            providerData: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_BYTE_BLOB {
-                size: 0,
-                data: ptr::null_mut(),
-            },
+            providerData:
+                windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_BYTE_BLOB {
+                    size: 0,
+                    data: ptr::null_mut(),
+                },
             weight: 0xFFFF, // Maximum weight - highest priority for TRusTY Wall filters
         };
 

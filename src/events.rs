@@ -5,19 +5,18 @@
 
 use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
-use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FwpmNetEventSubscribe0, FwpmNetEventUnsubscribe0,
-    FWPM_NET_EVENT_SUBSCRIPTION0, FWPM_NET_EVENT_CALLBACK0,
-    FWPM_NET_EVENT1,
-};
-use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE, FILETIME};
-use windows::core::GUID;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::path::PathBuf;
-use std::time::{SystemTime, Duration};
 use std::ffi::{c_void, OsString};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::windows::ffi::OsStringExt;
+use std::path::PathBuf;
 use std::sync::mpsc;
+use std::time::{Duration, SystemTime};
+use windows::core::GUID;
+use windows::Win32::Foundation::{ERROR_SUCCESS, FILETIME, HANDLE};
+use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
+    FwpmNetEventSubscribe0, FwpmNetEventUnsubscribe0, FWPM_NET_EVENT1, FWPM_NET_EVENT_CALLBACK0,
+    FWPM_NET_EVENT_SUBSCRIPTION0,
+};
 
 /// Network event from WFP
 ///
@@ -170,10 +169,7 @@ impl Drop for WfpEventSubscription {
     fn drop(&mut self) {
         if !self.subscription_handle.is_invalid() && !self.engine.is_null() {
             unsafe {
-                let _ = FwpmNetEventUnsubscribe0(
-                    (*self.engine).handle(),
-                    self.subscription_handle,
-                );
+                let _ = FwpmNetEventUnsubscribe0((*self.engine).handle(), self.subscription_handle);
             }
         }
     }
@@ -187,10 +183,7 @@ impl Drop for WfpEventSubscription {
 /// - Validate the event pointer is not null
 /// - Parse the FWPM_NET_EVENT1 structure
 /// - Send the parsed event to the channel without blocking
-unsafe extern "system" fn event_callback(
-    context: *mut c_void,
-    event_ptr: *const FWPM_NET_EVENT1,
-) {
+unsafe extern "system" fn event_callback(context: *mut c_void, event_ptr: *const FWPM_NET_EVENT1) {
     // Validate pointers
     if context.is_null() || event_ptr.is_null() {
         return;
@@ -221,8 +214,7 @@ unsafe fn parse_network_event(event: &FWPM_NET_EVENT1) -> Option<NetworkEvent> {
 
     // Parse application path (wide string) - appId.data is *mut u8, need to cast
     let app_path = if !header.appId.data.is_null() {
-        parse_wide_string(header.appId.data as *const u16)
-            .map(PathBuf::from)
+        parse_wide_string(header.appId.data as *const u16).map(PathBuf::from)
     } else {
         None
     };
@@ -317,7 +309,9 @@ unsafe fn parse_wide_string(ptr: *const u16) -> Option<OsString> {
 }
 
 /// Parse IPv4 address from union (reads first 4 bytes as u32) - HEADER1_0 version
-unsafe fn parse_ipv4_union(addr_union: &windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_NET_EVENT_HEADER1_0) -> Option<IpAddr> {
+unsafe fn parse_ipv4_union(
+    addr_union: &windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_NET_EVENT_HEADER1_0,
+) -> Option<IpAddr> {
     // Union contains localAddrV4 as u32
     let addr_u32 = addr_union.localAddrV4;
     let bytes = addr_u32.to_ne_bytes();
@@ -325,21 +319,27 @@ unsafe fn parse_ipv4_union(addr_union: &windows::Win32::NetworkManagement::Windo
 }
 
 /// Parse IPv6 address from union (reads 16-byte array) - HEADER1_0 version
-unsafe fn parse_ipv6_union(addr_union: &windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_NET_EVENT_HEADER1_0) -> Option<IpAddr> {
+unsafe fn parse_ipv6_union(
+    addr_union: &windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_NET_EVENT_HEADER1_0,
+) -> Option<IpAddr> {
     // Union contains localAddrV6 as byte[16]
     let bytes = addr_union.localAddrV6.byteArray16;
     Some(IpAddr::V6(Ipv6Addr::from(bytes)))
 }
 
 /// Parse IPv4 address from remote union (HEADER1_1 version)
-unsafe fn parse_ipv4_union_remote(addr_union: &windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_NET_EVENT_HEADER1_1) -> Option<IpAddr> {
+unsafe fn parse_ipv4_union_remote(
+    addr_union: &windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_NET_EVENT_HEADER1_1,
+) -> Option<IpAddr> {
     let addr_u32 = addr_union.remoteAddrV4;
     let bytes = addr_u32.to_ne_bytes();
     Some(IpAddr::V4(Ipv4Addr::from(bytes)))
 }
 
 /// Parse IPv6 address from remote union (HEADER1_1 version)
-unsafe fn parse_ipv6_union_remote(addr_union: &windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_NET_EVENT_HEADER1_1) -> Option<IpAddr> {
+unsafe fn parse_ipv6_union_remote(
+    addr_union: &windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_NET_EVENT_HEADER1_1,
+) -> Option<IpAddr> {
     let bytes = addr_union.remoteAddrV6.byteArray16;
     Some(IpAddr::V6(Ipv6Addr::from(bytes)))
 }

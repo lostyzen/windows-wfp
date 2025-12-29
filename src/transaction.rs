@@ -4,10 +4,10 @@
 
 use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
+use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmTransactionAbort0, FwpmTransactionBegin0, FwpmTransactionCommit0,
 };
-use windows::Win32::Foundation::ERROR_SUCCESS;
 
 /// WFP Transaction with RAII rollback support
 ///
