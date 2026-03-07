@@ -168,9 +168,63 @@ impl FilterEnumerator {
 
     /// Count all active WFP filters without collecting details
     ///
-    /// More efficient than `all()` when you only need the count.
+    /// Only counts filters without parsing their contents, avoiding
+    /// string allocations and condition extraction.
     pub fn count(engine: &WfpEngine) -> WfpResult<usize> {
-        Ok(Self::all(engine)?.len())
+        let mut enum_handle = HANDLE::default();
+
+        unsafe {
+            let result = FwpmFilterCreateEnumHandle0(engine.handle(), None, &mut enum_handle);
+
+            if result != ERROR_SUCCESS.0 {
+                return Err(WfpError::Other(format!(
+                    "Failed to create filter enum handle: error code {}",
+                    result
+                )));
+            }
+        }
+
+        let mut count: usize = 0;
+        let batch_size = 100;
+
+        loop {
+            let mut filter_array: *mut *mut FWPM_FILTER0 = ptr::null_mut();
+            let mut num_returned: u32 = 0;
+
+            unsafe {
+                let result = FwpmFilterEnum0(
+                    engine.handle(),
+                    enum_handle,
+                    batch_size,
+                    &mut filter_array,
+                    &mut num_returned,
+                );
+
+                if result != ERROR_SUCCESS.0 {
+                    let _ = FwpmFilterDestroyEnumHandle0(engine.handle(), enum_handle);
+                    return Err(WfpError::Other(format!(
+                        "Failed to enumerate filters: error code {}",
+                        result
+                    )));
+                }
+
+                if num_returned == 0 {
+                    break;
+                }
+
+                count += num_returned as usize;
+
+                if !filter_array.is_null() {
+                    FwpmFreeMemory0(&mut filter_array as *mut _ as *mut *mut _);
+                }
+            }
+        }
+
+        unsafe {
+            let _ = FwpmFilterDestroyEnumHandle0(engine.handle(), enum_handle);
+        }
+
+        Ok(count)
     }
 }
 
@@ -219,7 +273,14 @@ unsafe fn parse_filter(filter: &FWPM_FILTER0) -> FilterInfo {
         FWP_UINT8 => filter.weight.Anonymous.uint8 as u64,
         FWP_UINT16 => filter.weight.Anonymous.uint16 as u64,
         FWP_UINT32 => filter.weight.Anonymous.uint32 as u64,
-        FWP_UINT64 => *filter.weight.Anonymous.uint64,
+        FWP_UINT64 => {
+            let ptr = filter.weight.Anonymous.uint64;
+            if ptr.is_null() {
+                0
+            } else {
+                *ptr
+            }
+        }
         FWP_EMPTY => 0,
         _ => 0,
     };
@@ -260,8 +321,13 @@ unsafe fn extract_app_path(filter: &FWPM_FILTER0) -> Option<PathBuf> {
         return None;
     }
 
-    let blob = &*condition.conditionValue.Anonymous.byteBlob;
-    if blob.data.is_null() || blob.size == 0 {
+    let blob_ptr = condition.conditionValue.Anonymous.byteBlob;
+    if blob_ptr.is_null() {
+        return None;
+    }
+
+    let blob = &*blob_ptr;
+    if blob.data.is_null() || blob.size == 0 || (blob.size % 2) != 0 {
         return None;
     }
 
