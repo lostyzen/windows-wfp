@@ -1,6 +1,6 @@
-//! WFP Filter translation from domain RuleDef
+//! WFP Filter translation from FilterRule
 //!
-//! Translates platform-agnostic RuleDef into WFP FWPM_FILTER0 structures.
+//! Translates FilterRule into WFP FWPM_FILTER0 structures.
 //!
 //! # Path Format Conversion
 //!
@@ -20,16 +20,19 @@
 //! ## Implementation
 //!
 //! The `add_filter()` method automatically handles this conversion:
-//! 1. Takes a DOS path from `RuleDef.app_path` (e.g., `PathBuf::from(r"C:\Windows\System32\curl.exe")`)
+//! 1. Takes a DOS path from `FilterRule.app_path` (e.g., `PathBuf::from(r"C:\Windows\System32\curl.exe")`)
 //! 2. Calls `FwpmGetAppIdFromFileName0` to convert it to NT kernel format
 //! 3. Uses the converted path in the WFP filter condition
 //! 4. Properly frees the allocated memory after filter creation
 //!
 //! This ensures filters work correctly without requiring users to know about NT kernel paths.
 
+use crate::condition::Protocol;
 use crate::constants::*;
 use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
+use crate::filter::{Action, FilterRule};
+use crate::layer;
 use std::net::IpAddr;
 use std::ptr;
 use windows::core::{GUID, PWSTR};
@@ -42,38 +45,41 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK,
 };
 
-// Import domain types
-use trusty_domain::{Direction, Protocol, RuleAction, RuleDef};
-
 /// WFP Filter builder
 ///
-/// Translates domain RuleDef into WFP filter structures.
+/// Translates [`FilterRule`] into WFP filter structures and manages filter lifecycle.
+///
+/// # Examples
+///
+/// ```no_run
+/// use trusty_wfp::{WfpEngine, FilterBuilder, FilterRule, Direction, Action, FilterWeight, initialize_wfp};
+///
+/// let engine = WfpEngine::new()?;
+/// initialize_wfp(&engine)?;
+///
+/// let rule = FilterRule::new("Block curl", Direction::Outbound, Action::Block)
+///     .with_weight(FilterWeight::UserBlock)
+///     .with_app_path(r"C:\Windows\System32\curl.exe");
+///
+/// let filter_id = FilterBuilder::add_filter(&engine, &rule)?;
+/// // Later: remove the filter
+/// FilterBuilder::delete_filter(&engine, filter_id)?;
+/// # Ok::<(), trusty_wfp::WfpError>(())
+/// ```
 pub struct FilterBuilder;
 
 impl FilterBuilder {
-    /// Translate RuleDef to WFP layer GUID
-    ///
-    /// Maps direction to appropriate WFP layer based on IPv4/IPv6.
-    fn select_layer(direction: Direction, is_ipv6: bool) -> GUID {
-        match (direction, is_ipv6) {
-            (Direction::Outbound, false) => LAYER_ALE_AUTH_CONNECT_V4,
-            (Direction::Outbound, true) => LAYER_ALE_AUTH_CONNECT_V6,
-            (Direction::Inbound, false) => LAYER_ALE_AUTH_RECV_ACCEPT_V4,
-            (Direction::Inbound, true) => LAYER_ALE_AUTH_RECV_ACCEPT_V6,
-        }
-    }
-
-    /// Translate RuleAction to WFP action
-    fn translate_action(action: RuleAction) -> FWP_ACTION_TYPE {
+    /// Translate Action to WFP action type
+    fn translate_action(action: Action) -> FWP_ACTION_TYPE {
         match action {
-            RuleAction::Allow => FWP_ACTION_PERMIT,
-            RuleAction::Block => FWP_ACTION_BLOCK,
+            Action::Permit => FWP_ACTION_PERMIT,
+            Action::Block => FWP_ACTION_BLOCK,
         }
     }
 
     /// Translate Protocol to IP protocol number
     fn translate_protocol(protocol: Protocol) -> u8 {
-        protocol as u8 // Already has correct values: Tcp=6, Udp=17, Icmp=1, Icmpv6=58
+        protocol.as_u8()
     }
 
     /// Convert CIDR prefix length to IPv4 netmask
@@ -91,7 +97,7 @@ impl FilterBuilder {
 
     /// Add filter to WFP engine
     ///
-    /// Translates RuleDef and adds it to WFP within a transaction.
+    /// Translates a [`FilterRule`] and adds it to the WFP engine.
     ///
     /// # Errors
     ///
@@ -100,17 +106,17 @@ impl FilterBuilder {
     /// # Examples
     ///
     /// ```no_run
-    /// use trusty_wfp::{WfpEngine, FilterBuilder, initialize_wfp};
-    /// use trusty_domain::RuleDef;
+    /// use trusty_wfp::{WfpEngine, FilterBuilder, FilterRule, Direction, Action, FilterWeight, initialize_wfp};
     ///
     /// let engine = WfpEngine::new()?;
     /// initialize_wfp(&engine)?;
     ///
-    /// let rule = RuleDef::allow_outbound();
+    /// let rule = FilterRule::new("Allow all outbound", Direction::Outbound, Action::Permit)
+    ///     .with_weight(FilterWeight::DefaultPermit);
     /// let filter_id = FilterBuilder::add_filter(&engine, &rule)?;
     /// # Ok::<(), trusty_wfp::WfpError>(())
     /// ```
-    pub fn add_filter(engine: &WfpEngine, rule: &RuleDef) -> WfpResult<u64> {
+    pub fn add_filter(engine: &WfpEngine, rule: &FilterRule) -> WfpResult<u64> {
         // Determine if rule uses IPv6 (based on remote_ip if present)
         let is_ipv6 = rule
             .remote_ip
@@ -118,37 +124,16 @@ impl FilterBuilder {
             .map(|ip_mask| matches!(ip_mask.addr, IpAddr::V6(_)))
             .unwrap_or(false);
 
-        let layer_key = Self::select_layer(rule.direction, is_ipv6);
+        let layer_key = layer::select_layer(rule.direction, is_ipv6);
         let action = Self::translate_action(rule.action);
 
         // Convert name to wide string - must outlive FwpmFilterAdd0 call
         let name_wide: Vec<u16> = rule.name.encode_utf16().chain(std::iter::once(0)).collect();
 
         // Weight storage - must outlive FwpmFilterAdd0 call
-        //
-        // IMPORTANT: WFP supports different weight types (FWP_UINT8, FWP_UINT64, etc.)
-        // TinyWall uses FWP_UINT64 to store FilterWeight values directly in millions (3M-9M).
-        // This gives much finer-grained priority control than the 0-15 range of FWP_UINT8.
-        //
-        // Priority formula: Sublayer Weight (0xFFFF) + Filter Weight (millions)
-        // Example: Sublayer 65535 + UserBlock 6000000 = Total priority 6065535
         let weight_value: u64 = rule.weight;
 
-        // Storage for condition data that must outlive FwpmFilterAdd0 call
-
         // CRITICAL: Convert DOS path to NT kernel format using FwpmGetAppIdFromFileName0
-        //
-        // WFP operates at the kernel level and requires NT kernel paths, not DOS paths:
-        // - DOS path:    C:\Windows\System32\curl.exe
-        // - NT path:     \device\harddiskvolume4\windows\system32\curl.exe
-        //
-        // Without this conversion, filters will be added successfully but will NEVER match
-        // any actual network traffic because WFP compares the filter path against the
-        // kernel-level path of the process making the connection.
-        //
-        // FwpmGetAppIdFromFileName0 performs the conversion and returns a FWP_BYTE_BLOB
-        // containing the NT kernel path as a wide string. This blob must be freed with
-        // FwpmFreeMemory0 after the filter is added.
         let app_id_blob: Option<(*mut FWP_BYTE_BLOB, bool)> =
             rule.app_path.as_ref().and_then(|app_path| {
                 unsafe {
@@ -161,12 +146,8 @@ impl FilterBuilder {
                     let result = FwpmGetAppIdFromFileName0(pwstr, &mut blob_ptr);
 
                     if result == ERROR_SUCCESS.0 {
-                        // Successfully converted DOS path to NT kernel format
-                        // The blob_ptr now points to WFP-allocated memory containing the NT path
-                        Some((blob_ptr, true)) // true = needs FwpmFreeMemory0 cleanup
+                        Some((blob_ptr, true))
                     } else {
-                        // Conversion failed - file may not exist or path is invalid
-                        // Return None to skip APP_ID condition entirely
                         None
                     }
                 }
@@ -220,7 +201,7 @@ impl FilterBuilder {
                 }
             });
 
-        // Build conditions - now all data is stored above and will outlive this call
+        // Build conditions
         let mut conditions = Vec::new();
 
         // Condition: APP_ID (application path in NT kernel format)
@@ -245,7 +226,7 @@ impl FilterBuilder {
                 conditionValue: FWP_CONDITION_VALUE0 {
                     r#type: FWP_UINT16,
                     Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
-                        uint16: remote_port.value(),
+                        uint16: remote_port,
                     },
                 },
             });
@@ -259,7 +240,7 @@ impl FilterBuilder {
                 conditionValue: FWP_CONDITION_VALUE0 {
                     r#type: FWP_UINT16,
                     Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
-                        uint16: local_port.value(),
+                        uint16: local_port,
                     },
                 },
             });
@@ -337,7 +318,7 @@ impl FilterBuilder {
 
         // Create the filter structure
         let filter = FWPM_FILTER0 {
-            filterKey: GUID::zeroed(), // Let WFP generate GUID
+            filterKey: GUID::zeroed(),
             displayData:
                 windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_DISPLAY_DATA0 {
                     name: PWSTR(name_wide.as_ptr() as *mut u16),
@@ -356,7 +337,7 @@ impl FilterBuilder {
                 r#type: FWP_UINT64,
                 Anonymous:
                     windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_VALUE0_0 {
-                        uint64: &weight_value as *const u64 as *mut u64, // TinyWall approach: store millions directly
+                        uint64: &weight_value as *const u64 as *mut u64,
                     },
             },
             numFilterConditions: conditions.len() as u32,
@@ -409,13 +390,13 @@ impl FilterBuilder {
     /// # Examples
     ///
     /// ```no_run
-    /// use trusty_wfp::{WfpEngine, FilterBuilder, initialize_wfp};
-    /// use trusty_domain::RuleDef;
+    /// use trusty_wfp::{WfpEngine, FilterBuilder, FilterRule, Direction, Action, FilterWeight, initialize_wfp};
     ///
     /// let engine = WfpEngine::new()?;
     /// initialize_wfp(&engine)?;
     ///
-    /// let rule = RuleDef::allow_outbound();
+    /// let rule = FilterRule::new("Allow all", Direction::Outbound, Action::Permit)
+    ///     .with_weight(FilterWeight::DefaultPermit);
     /// let filter_id = FilterBuilder::add_filter(&engine, &rule)?;
     ///
     /// // Later: remove the filter
@@ -441,36 +422,17 @@ impl FilterBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trusty_domain::Protocol;
-
-    #[test]
-    fn test_layer_selection() {
-        assert_eq!(
-            FilterBuilder::select_layer(Direction::Outbound, false),
-            LAYER_ALE_AUTH_CONNECT_V4
-        );
-        assert_eq!(
-            FilterBuilder::select_layer(Direction::Outbound, true),
-            LAYER_ALE_AUTH_CONNECT_V6
-        );
-        assert_eq!(
-            FilterBuilder::select_layer(Direction::Inbound, false),
-            LAYER_ALE_AUTH_RECV_ACCEPT_V4
-        );
-        assert_eq!(
-            FilterBuilder::select_layer(Direction::Inbound, true),
-            LAYER_ALE_AUTH_RECV_ACCEPT_V6
-        );
-    }
+    use crate::condition::Protocol;
+    use crate::filter::{Action, FilterRule};
 
     #[test]
     fn test_action_translation() {
         assert_eq!(
-            FilterBuilder::translate_action(RuleAction::Allow),
+            FilterBuilder::translate_action(Action::Permit),
             FWP_ACTION_PERMIT
         );
         assert_eq!(
-            FilterBuilder::translate_action(RuleAction::Block),
+            FilterBuilder::translate_action(Action::Block),
             FWP_ACTION_BLOCK
         );
     }
@@ -503,7 +465,7 @@ mod tests {
         let engine = WfpEngine::new().expect("Failed to create engine");
         crate::initialize_wfp(&engine).expect("Failed to initialize WFP");
 
-        let rule = RuleDef::allow_outbound();
+        let rule = FilterRule::allow_all_outbound();
         let result = FilterBuilder::add_filter(&engine, &rule);
 
         assert!(result.is_ok(), "Failed to add filter: {:?}", result);
@@ -515,12 +477,9 @@ mod tests {
         let engine = WfpEngine::new().expect("Failed to create engine");
         crate::initialize_wfp(&engine).expect("Failed to initialize WFP");
 
-        let rule = RuleDef::allow_outbound();
+        let rule = FilterRule::allow_all_outbound();
 
-        // Add filter
         let filter_id = FilterBuilder::add_filter(&engine, &rule).expect("Failed to add filter");
-
-        // Delete filter
         let result = FilterBuilder::delete_filter(&engine, filter_id);
 
         assert!(result.is_ok(), "Failed to delete filter: {:?}", result);

@@ -1,4 +1,4 @@
-//! # TRusTY Wall - Windows Filtering Platform (WFP) Wrapper
+//! # trusty-wfp — Windows Filtering Platform (WFP) Wrapper
 //!
 //! Safe Rust wrapper around Windows Filtering Platform APIs.
 //!
@@ -10,16 +10,14 @@
 //!
 //! - **WFP Engine Management** - RAII-based session lifecycle with automatic cleanup
 //! - **Provider & Sublayer** - Registration of custom firewall provider with high priority
-//! - **Filter Creation** - Translate domain rules to WFP filters with automatic DOS-to-NT path conversion
+//! - **Filter Creation** - Builder-pattern filter rules with automatic DOS-to-NT path conversion
 //! - **Event Subscription** - Real-time monitoring of network events (learning mode)
 //! - **Memory Safety** - All Windows handles managed with RAII, minimal unsafe code
 //!
 //! ## Quick Start
 //!
 //! ```no_run
-//! use trusty_wfp::{WfpEngine, FilterBuilder, initialize_wfp};
-//! use trusty_domain::{RuleDef, Direction, RuleAction, FilterWeight};
-//! use std::path::PathBuf;
+//! use trusty_wfp::{WfpEngine, FilterBuilder, FilterRule, Direction, Action, FilterWeight, initialize_wfp};
 //!
 //! // Open WFP engine (requires Administrator)
 //! let engine = WfpEngine::new()?;
@@ -28,21 +26,9 @@
 //! initialize_wfp(&engine)?;
 //!
 //! // Block an application
-//! let rule = RuleDef {
-//!     name: "Block curl".into(),
-//!     direction: Direction::Outbound,
-//!     action: RuleAction::Block,
-//!     weight: FilterWeight::UserBlock.value(),
-//!     app_path: Some(PathBuf::from(r"C:\Windows\System32\curl.exe")),
-//!     // ... other fields
-//!     # service_name: None,
-//!     # app_container_sid: None,
-//!     # local_ip: None,
-//!     # remote_ip: None,
-//!     # local_port: None,
-//!     # remote_port: None,
-//!     # protocol: None,
-//! };
+//! let rule = FilterRule::new("Block curl", Direction::Outbound, Action::Block)
+//!     .with_weight(FilterWeight::UserBlock)
+//!     .with_app_path(r"C:\Windows\System32\curl.exe");
 //!
 //! let filter_id = FilterBuilder::add_filter(&engine, &rule)?;
 //!
@@ -88,33 +74,6 @@
 //! }
 //! # Ok::<(), trusty_wfp::WfpError>(())
 //! ```
-//!
-//! ## Examples
-//!
-//! See the `examples/` directory for complete demonstrations:
-//!
-//! - `simple_block.rs` - Basic filter addition and removal
-//! - `live_demo.rs` - Full demo with event monitoring
-//! - `list_filters.rs` - Enumerate all WFP filters in the system
-//!
-//! Run examples (requires Administrator):
-//! ```bash
-//! cargo run --example live_demo --release
-//! ```
-//!
-//! ## Architecture
-//!
-//! This crate is part of the TRusTY Wall firewall project and sits at the infrastructure layer,
-//! providing the adapter between domain rules ([`RuleDef`](trusty_domain::RuleDef)) and the
-//! Windows kernel-level firewall.
-//!
-//! ## Safety
-//!
-//! WFP requires FFI calls to Windows APIs. This crate minimizes unsafe code:
-//! - All Windows handles use RAII (`Drop` trait) for automatic cleanup
-//! - FFI boundaries are well-isolated in specific modules
-//! - Memory allocated by WFP is properly freed with `FwpmFreeMemory0`
-//! - Wide string conversions are handled safely
 
 pub mod condition;
 pub mod constants;
@@ -125,15 +84,16 @@ pub mod filter;
 pub mod filter_builder;
 pub mod layer;
 pub mod provider;
-pub mod safe_handles;
 pub mod transaction;
 
 // Re-exports
+pub use condition::{IpAddrMask, Protocol};
+pub use constants::*;
 pub use engine::WfpEngine;
+pub use errors::{WfpError, WfpResult};
 pub use events::{NetworkEvent, NetworkEventType, WfpEventSubscription};
+pub use filter::{Action, Direction, FilterRule};
 pub use filter_builder::FilterBuilder;
+pub use layer::FilterWeight;
 pub use provider::{initialize_wfp, WfpProvider, WfpSublayer};
 pub use transaction::WfpTransaction;
-// pub use filter::Filter;
-pub use constants::*;
-pub use errors::{WfpError, WfpResult};
