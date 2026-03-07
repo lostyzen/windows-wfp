@@ -1,4 +1,4 @@
-//! # trusty-wfp — Windows Filtering Platform (WFP) Wrapper
+//! # windows-wfp — Windows Filtering Platform (WFP) Wrapper
 //!
 //! Safe Rust wrapper around Windows Filtering Platform APIs.
 //!
@@ -17,7 +17,7 @@
 //! ## Quick Start
 //!
 //! ```no_run
-//! use trusty_wfp::{WfpEngine, FilterBuilder, FilterRule, Direction, Action, FilterWeight, initialize_wfp};
+//! use windows_wfp::{WfpEngine, FilterBuilder, FilterRule, Direction, Action, FilterWeight, initialize_wfp};
 //!
 //! // Open WFP engine (requires Administrator)
 //! let engine = WfpEngine::new()?;
@@ -36,7 +36,7 @@
 //!
 //! // Clean up
 //! FilterBuilder::delete_filter(&engine, filter_id)?;
-//! # Ok::<(), trusty_wfp::WfpError>(())
+//! # Ok::<(), windows_wfp::WfpError>(())
 //! ```
 //!
 //! ## Path Conversion
@@ -55,7 +55,7 @@
 //! Subscribe to network events for learning mode:
 //!
 //! ```no_run
-//! use trusty_wfp::{WfpEngine, WfpEventSubscription};
+//! use windows_wfp::{WfpEngine, WfpEventSubscription};
 //!
 //! let engine = WfpEngine::new()?;
 //! let subscription = WfpEventSubscription::new(&engine)?;
@@ -72,7 +72,7 @@
 //!         Err(_) => break,
 //!     }
 //! }
-//! # Ok::<(), trusty_wfp::WfpError>(())
+//! # Ok::<(), windows_wfp::WfpError>(())
 //! ```
 
 pub mod condition;

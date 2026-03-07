@@ -1,10 +1,16 @@
 [package]
-name = "trusty-wfp"
-version.workspace = true
-authors.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
+name = "windows-wfp"
+version = "0.1.0"
+authors = ["Pierre <lostyzen@github.com>"]
+edition = "2021"
+rust-version = "1.75"
+license = "GPL-2.0"
+description = "Safe Rust wrapper for the Windows Filtering Platform (WFP) kernel-level firewall API"
+repository = "https://github.com/lostyzen/TRusTY-Wall"
+documentation = "https://docs.rs/windows-wfp"
+readme = "README.md"
+keywords = ["windows", "firewall", "wfp", "network", "filter"]
+categories = ["os::windows-apis", "network-programming"]
 
 [dependencies]
 windows = { workspace = true }

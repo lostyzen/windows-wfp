@@ -68,3 +68,105 @@ impl From<WIN32_ERROR> for WfpError {
 }
 
 pub type WfpResult<T> = std::result::Result<T, WfpError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_display_messages() {
+        assert_eq!(
+            WfpError::EngineOpenFailed.to_string(),
+            "Failed to open WFP engine session"
+        );
+        assert_eq!(
+            WfpError::InsufficientPermissions.to_string(),
+            "Insufficient permissions - administrator privileges required"
+        );
+        assert_eq!(
+            WfpError::ServiceNotAvailable.to_string(),
+            "Windows Filtering Platform service not available"
+        );
+        assert_eq!(
+            WfpError::TransactionBeginFailed.to_string(),
+            "Failed to begin WFP transaction"
+        );
+        assert_eq!(
+            WfpError::TransactionCommitFailed.to_string(),
+            "Failed to commit WFP transaction"
+        );
+        assert_eq!(
+            WfpError::TransactionAbortFailed.to_string(),
+            "Failed to abort WFP transaction"
+        );
+    }
+
+    #[test]
+    fn test_error_display_with_details() {
+        let err = WfpError::FilterAddFailed("test error".into());
+        assert_eq!(err.to_string(), "Failed to add filter: test error");
+
+        let err = WfpError::FilterDeleteFailed("filter 42".into());
+        assert_eq!(err.to_string(), "Failed to delete filter: filter 42");
+
+        let err = WfpError::Other("something happened".into());
+        assert_eq!(err.to_string(), "something happened");
+    }
+
+    #[test]
+    fn test_win32_error_display() {
+        let err = WfpError::Win32Error {
+            code: 5,
+            message: "Access denied".into(),
+        };
+        assert_eq!(err.to_string(), "Win32 error 5: Access denied");
+    }
+
+    #[test]
+    fn test_win32_error_conversion_access_denied() {
+        let err: WfpError = WIN32_ERROR(5).into();
+        match err {
+            WfpError::Win32Error { code, message } => {
+                assert_eq!(code, 5);
+                assert_eq!(message, "Access denied");
+            }
+            _ => panic!("Expected Win32Error"),
+        }
+    }
+
+    #[test]
+    fn test_win32_error_conversion_service_not_started() {
+        let err: WfpError = WIN32_ERROR(1062).into();
+        match err {
+            WfpError::Win32Error { code, message } => {
+                assert_eq!(code, 1062);
+                assert_eq!(message, "Service not started");
+            }
+            _ => panic!("Expected Win32Error"),
+        }
+    }
+
+    #[test]
+    fn test_win32_error_conversion_dependency_missing() {
+        let err: WfpError = WIN32_ERROR(1075).into();
+        match err {
+            WfpError::Win32Error { code, message } => {
+                assert_eq!(code, 1075);
+                assert_eq!(message, "Service dependency does not exist");
+            }
+            _ => panic!("Expected Win32Error"),
+        }
+    }
+
+    #[test]
+    fn test_win32_error_conversion_unknown() {
+        let err: WfpError = WIN32_ERROR(9999).into();
+        match err {
+            WfpError::Win32Error { code, message } => {
+                assert_eq!(code, 9999);
+                assert!(message.contains("Unknown"));
+            }
+            _ => panic!("Expected Win32Error"),
+        }
+    }
+}

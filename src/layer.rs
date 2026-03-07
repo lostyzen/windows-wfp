@@ -21,7 +21,7 @@ pub fn select_layer(direction: Direction, is_ipv6: bool) -> GUID {
 /// # Examples
 ///
 /// ```
-/// use trusty_wfp::FilterWeight;
+/// use windows_wfp::FilterWeight;
 ///
 /// assert!(FilterWeight::Blocklist.value() > FilterWeight::UserBlock.value());
 /// assert!(FilterWeight::UserBlock.value() > FilterWeight::DefaultBlock.value());
@@ -58,10 +58,22 @@ mod tests {
 
     #[test]
     fn test_layer_selection() {
-        assert_eq!(select_layer(Direction::Outbound, false), LAYER_ALE_AUTH_CONNECT_V4);
-        assert_eq!(select_layer(Direction::Outbound, true), LAYER_ALE_AUTH_CONNECT_V6);
-        assert_eq!(select_layer(Direction::Inbound, false), LAYER_ALE_AUTH_RECV_ACCEPT_V4);
-        assert_eq!(select_layer(Direction::Inbound, true), LAYER_ALE_AUTH_RECV_ACCEPT_V6);
+        assert_eq!(
+            select_layer(Direction::Outbound, false),
+            LAYER_ALE_AUTH_CONNECT_V4
+        );
+        assert_eq!(
+            select_layer(Direction::Outbound, true),
+            LAYER_ALE_AUTH_CONNECT_V6
+        );
+        assert_eq!(
+            select_layer(Direction::Inbound, false),
+            LAYER_ALE_AUTH_RECV_ACCEPT_V4
+        );
+        assert_eq!(
+            select_layer(Direction::Inbound, true),
+            LAYER_ALE_AUTH_RECV_ACCEPT_V6
+        );
     }
 
     #[test]

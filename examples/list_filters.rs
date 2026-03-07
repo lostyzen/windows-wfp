@@ -12,11 +12,11 @@
 //! ```
 
 use std::ptr;
-use trusty_wfp::{WfpEngine, WfpResult};
 use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmFilterCreateEnumHandle0, FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0, FWPM_FILTER0,
 };
+use windows_wfp::{WfpEngine, WfpResult};
 
 fn main() -> WfpResult<()> {
     println!("🔍 TRusTY Wall - WFP Filter Enumeration\n");

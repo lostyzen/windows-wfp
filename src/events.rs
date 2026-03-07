@@ -355,4 +355,90 @@ mod tests {
         assert_eq!(NetworkEventType::from(7), NetworkEventType::CapabilityDrop);
         assert_eq!(NetworkEventType::from(99), NetworkEventType::Other(99));
     }
+
+    #[test]
+    fn test_event_type_boundaries() {
+        assert_eq!(NetworkEventType::from(0), NetworkEventType::Other(0));
+        assert_eq!(NetworkEventType::from(2), NetworkEventType::Other(2));
+        assert_eq!(NetworkEventType::from(4), NetworkEventType::Other(4));
+        assert_eq!(NetworkEventType::from(5), NetworkEventType::Other(5));
+        assert_eq!(NetworkEventType::from(8), NetworkEventType::Other(8));
+    }
+
+    #[test]
+    fn test_filetime_to_systemtime_unix_epoch() {
+        // FILETIME for Unix epoch (Jan 1, 1970) = 116444736000000000
+        let intervals: u64 = 116444736000000000;
+        let ft = FILETIME {
+            dwLowDateTime: intervals as u32,
+            dwHighDateTime: (intervals >> 32) as u32,
+        };
+        let result = filetime_to_systemtime(&ft);
+        assert_eq!(result, SystemTime::UNIX_EPOCH);
+    }
+
+    #[test]
+    fn test_filetime_to_systemtime_before_unix_epoch() {
+        let ft = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        assert_eq!(filetime_to_systemtime(&ft), SystemTime::UNIX_EPOCH);
+    }
+
+    #[test]
+    fn test_filetime_to_systemtime_known_date() {
+        // Jan 1, 2000 = 125911584000000000 intervals from Windows epoch
+        let intervals: u64 = 125911584000000000;
+        let ft = FILETIME {
+            dwLowDateTime: intervals as u32,
+            dwHighDateTime: (intervals >> 32) as u32,
+        };
+        let result = filetime_to_systemtime(&ft);
+        let duration = result.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        assert_eq!(duration.as_secs(), 946684800); // Jan 1, 2000
+    }
+
+    #[test]
+    fn test_network_event_struct_creation() {
+        let event = NetworkEvent {
+            timestamp: SystemTime::UNIX_EPOCH,
+            event_type: NetworkEventType::ClassifyDrop,
+            app_path: Some(PathBuf::from(r"C:\test.exe")),
+            protocol: 6,
+            local_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            remote_addr: Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+            local_port: 12345,
+            remote_port: 443,
+            filter_id: Some(42),
+            layer_id: Some(1),
+        };
+
+        assert_eq!(event.event_type, NetworkEventType::ClassifyDrop);
+        assert_eq!(event.protocol, 6);
+        assert_eq!(event.local_port, 12345);
+        assert_eq!(event.remote_port, 443);
+        assert!(event.app_path.is_some());
+    }
+
+    #[test]
+    fn test_network_event_clone() {
+        let event = NetworkEvent {
+            timestamp: SystemTime::UNIX_EPOCH,
+            event_type: NetworkEventType::ClassifyAllow,
+            app_path: None,
+            protocol: 17,
+            local_addr: None,
+            remote_addr: None,
+            local_port: 0,
+            remote_port: 0,
+            filter_id: None,
+            layer_id: None,
+        };
+
+        let cloned = event.clone();
+        assert_eq!(cloned.event_type, NetworkEventType::ClassifyAllow);
+        assert_eq!(cloned.protocol, 17);
+        assert!(cloned.app_path.is_none());
+    }
 }

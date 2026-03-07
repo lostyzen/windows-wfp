@@ -33,7 +33,7 @@ pub enum Action {
 /// # Examples
 ///
 /// ```
-/// use trusty_wfp::{FilterRule, Direction, Action, FilterWeight};
+/// use windows_wfp::{FilterRule, Direction, Action, FilterWeight};
 /// use std::path::PathBuf;
 ///
 /// // Block all outbound traffic from curl.exe
@@ -229,10 +229,96 @@ mod tests {
     fn test_with_ip_conditions() {
         use std::net::IpAddr;
         let rule = FilterRule::new("IP filter", Direction::Outbound, Action::Block)
-            .with_remote_ip(IpAddrMask::new("192.168.1.0".parse::<IpAddr>().unwrap(), 24))
+            .with_remote_ip(IpAddrMask::new(
+                "192.168.1.0".parse::<IpAddr>().unwrap(),
+                24,
+            ))
             .with_local_ip(IpAddrMask::new("10.0.0.1".parse::<IpAddr>().unwrap(), 32));
 
         assert!(rule.remote_ip.is_some());
         assert_eq!(rule.remote_ip.as_ref().unwrap().prefix_len, 24);
+    }
+
+    #[test]
+    fn test_with_service_name() {
+        let rule = FilterRule::new("Svc filter", Direction::Outbound, Action::Permit)
+            .with_service_name("dnscache");
+        assert_eq!(rule.service_name.as_deref(), Some("dnscache"));
+    }
+
+    #[test]
+    fn test_with_app_container_sid() {
+        let rule = FilterRule::new("UWP filter", Direction::Outbound, Action::Permit)
+            .with_app_container_sid("S-1-15-2-1234");
+        assert_eq!(rule.app_container_sid.as_deref(), Some("S-1-15-2-1234"));
+    }
+
+    #[test]
+    fn test_with_local_port() {
+        let rule = FilterRule::new("Port filter", Direction::Inbound, Action::Permit)
+            .with_local_port(8080);
+        assert_eq!(rule.local_port, Some(8080));
+    }
+
+    #[test]
+    fn test_block_all_inbound() {
+        let rule = FilterRule::block_all_inbound();
+        assert_eq!(rule.direction, Direction::Inbound);
+        assert_eq!(rule.action, Action::Block);
+        assert_eq!(rule.weight, FilterWeight::DefaultBlock.value());
+    }
+
+    #[test]
+    fn test_all_defaults_none() {
+        let rule = FilterRule::new("Empty", Direction::Outbound, Action::Permit);
+        assert!(rule.app_path.is_none());
+        assert!(rule.service_name.is_none());
+        assert!(rule.app_container_sid.is_none());
+        assert!(rule.local_ip.is_none());
+        assert!(rule.remote_ip.is_none());
+        assert!(rule.local_port.is_none());
+        assert!(rule.remote_port.is_none());
+        assert!(rule.protocol.is_none());
+    }
+
+    #[test]
+    fn test_full_builder_chain() {
+        use std::net::IpAddr;
+        let rule = FilterRule::new("Full", Direction::Outbound, Action::Block)
+            .with_weight(FilterWeight::UserBlock)
+            .with_app_path(r"C:\test.exe")
+            .with_protocol(Protocol::Tcp)
+            .with_remote_port(443)
+            .with_local_port(0)
+            .with_remote_ip(IpAddrMask::new("1.1.1.1".parse::<IpAddr>().unwrap(), 32))
+            .with_local_ip(IpAddrMask::new("10.0.0.1".parse::<IpAddr>().unwrap(), 32))
+            .with_service_name("svc")
+            .with_app_container_sid("sid");
+
+        assert_eq!(rule.name, "Full");
+        assert!(rule.app_path.is_some());
+        assert_eq!(rule.protocol, Some(Protocol::Tcp));
+        assert_eq!(rule.remote_port, Some(443));
+        assert_eq!(rule.local_port, Some(0));
+        assert!(rule.remote_ip.is_some());
+        assert!(rule.local_ip.is_some());
+        assert_eq!(rule.service_name.as_deref(), Some("svc"));
+        assert_eq!(rule.app_container_sid.as_deref(), Some("sid"));
+    }
+
+    #[test]
+    fn test_direction_copy_eq() {
+        let d1 = Direction::Outbound;
+        let d2 = d1; // Copy
+        assert_eq!(d1, d2);
+        assert_ne!(Direction::Inbound, Direction::Outbound);
+    }
+
+    #[test]
+    fn test_action_copy_eq() {
+        let a1 = Action::Permit;
+        let a2 = a1; // Copy
+        assert_eq!(a1, a2);
+        assert_ne!(Action::Permit, Action::Block);
     }
 }

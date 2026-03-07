@@ -52,7 +52,7 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
 /// # Examples
 ///
 /// ```no_run
-/// use trusty_wfp::{WfpEngine, FilterBuilder, FilterRule, Direction, Action, FilterWeight, initialize_wfp};
+/// use windows_wfp::{WfpEngine, FilterBuilder, FilterRule, Direction, Action, FilterWeight, initialize_wfp};
 ///
 /// let engine = WfpEngine::new()?;
 /// initialize_wfp(&engine)?;
@@ -64,7 +64,7 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
 /// let filter_id = FilterBuilder::add_filter(&engine, &rule)?;
 /// // Later: remove the filter
 /// FilterBuilder::delete_filter(&engine, filter_id)?;
-/// # Ok::<(), trusty_wfp::WfpError>(())
+/// # Ok::<(), windows_wfp::WfpError>(())
 /// ```
 pub struct FilterBuilder;
 
@@ -106,7 +106,7 @@ impl FilterBuilder {
     /// # Examples
     ///
     /// ```no_run
-    /// use trusty_wfp::{WfpEngine, FilterBuilder, FilterRule, Direction, Action, FilterWeight, initialize_wfp};
+    /// use windows_wfp::{WfpEngine, FilterBuilder, FilterRule, Direction, Action, FilterWeight, initialize_wfp};
     ///
     /// let engine = WfpEngine::new()?;
     /// initialize_wfp(&engine)?;
@@ -114,7 +114,7 @@ impl FilterBuilder {
     /// let rule = FilterRule::new("Allow all outbound", Direction::Outbound, Action::Permit)
     ///     .with_weight(FilterWeight::DefaultPermit);
     /// let filter_id = FilterBuilder::add_filter(&engine, &rule)?;
-    /// # Ok::<(), trusty_wfp::WfpError>(())
+    /// # Ok::<(), windows_wfp::WfpError>(())
     /// ```
     pub fn add_filter(engine: &WfpEngine, rule: &FilterRule) -> WfpResult<u64> {
         // Determine if rule uses IPv6 (based on remote_ip if present)
@@ -135,21 +135,19 @@ impl FilterBuilder {
 
         // CRITICAL: Convert DOS path to NT kernel format using FwpmGetAppIdFromFileName0
         let app_id_blob: Option<(*mut FWP_BYTE_BLOB, bool)> =
-            rule.app_path.as_ref().and_then(|app_path| {
-                unsafe {
-                    let path_str = app_path.to_string_lossy().to_string();
-                    let path_wide: Vec<u16> =
-                        path_str.encode_utf16().chain(std::iter::once(0)).collect();
-                    let pwstr = PWSTR(path_wide.as_ptr() as *mut u16);
+            rule.app_path.as_ref().and_then(|app_path| unsafe {
+                let path_str = app_path.to_string_lossy().to_string();
+                let path_wide: Vec<u16> =
+                    path_str.encode_utf16().chain(std::iter::once(0)).collect();
+                let pwstr = PWSTR(path_wide.as_ptr() as *mut u16);
 
-                    let mut blob_ptr: *mut FWP_BYTE_BLOB = ptr::null_mut();
-                    let result = FwpmGetAppIdFromFileName0(pwstr, &mut blob_ptr);
+                let mut blob_ptr: *mut FWP_BYTE_BLOB = ptr::null_mut();
+                let result = FwpmGetAppIdFromFileName0(pwstr, &mut blob_ptr);
 
-                    if result == ERROR_SUCCESS.0 {
-                        Some((blob_ptr, true))
-                    } else {
-                        None
-                    }
+                if result == ERROR_SUCCESS.0 {
+                    Some((blob_ptr, true))
+                } else {
+                    None
                 }
             });
 
@@ -390,7 +388,7 @@ impl FilterBuilder {
     /// # Examples
     ///
     /// ```no_run
-    /// use trusty_wfp::{WfpEngine, FilterBuilder, FilterRule, Direction, Action, FilterWeight, initialize_wfp};
+    /// use windows_wfp::{WfpEngine, FilterBuilder, FilterRule, Direction, Action, FilterWeight, initialize_wfp};
     ///
     /// let engine = WfpEngine::new()?;
     /// initialize_wfp(&engine)?;
@@ -401,7 +399,7 @@ impl FilterBuilder {
     ///
     /// // Later: remove the filter
     /// FilterBuilder::delete_filter(&engine, filter_id)?;
-    /// # Ok::<(), trusty_wfp::WfpError>(())
+    /// # Ok::<(), windows_wfp::WfpError>(())
     /// ```
     pub fn delete_filter(engine: &WfpEngine, filter_id: u64) -> WfpResult<()> {
         unsafe {
@@ -457,6 +455,23 @@ mod tests {
         assert_eq!(FilterBuilder::prefix_to_v4_mask(16), 0xFFFF0000);
         assert_eq!(FilterBuilder::prefix_to_v4_mask(24), 0xFFFFFF00);
         assert_eq!(FilterBuilder::prefix_to_v4_mask(32), 0xFFFFFFFF);
+    }
+
+    #[test]
+    fn test_prefix_to_v4_mask_all_values() {
+        assert_eq!(FilterBuilder::prefix_to_v4_mask(1), 0x80000000);
+        assert_eq!(FilterBuilder::prefix_to_v4_mask(4), 0xF0000000);
+        assert_eq!(FilterBuilder::prefix_to_v4_mask(12), 0xFFF00000);
+        assert_eq!(FilterBuilder::prefix_to_v4_mask(20), 0xFFFFF000);
+        assert_eq!(FilterBuilder::prefix_to_v4_mask(28), 0xFFFFFFF0);
+        assert_eq!(FilterBuilder::prefix_to_v4_mask(31), 0xFFFFFFFE);
+    }
+
+    #[test]
+    fn test_prefix_to_v4_mask_overflow() {
+        // prefix > 32 should saturate to all ones
+        assert_eq!(FilterBuilder::prefix_to_v4_mask(33), 0xFFFFFFFF);
+        assert_eq!(FilterBuilder::prefix_to_v4_mask(255), 0xFFFFFFFF);
     }
 
     #[test]

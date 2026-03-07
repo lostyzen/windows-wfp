@@ -18,12 +18,12 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
 /// # Examples
 ///
 /// ```no_run
-/// use trusty_wfp::WfpEngine;
+/// use windows_wfp::WfpEngine;
 ///
 /// let engine = WfpEngine::new()?;
 /// // Use engine for filter operations
 /// // Session automatically closed when engine goes out of scope
-/// # Ok::<(), trusty_wfp::WfpError>(())
+/// # Ok::<(), windows_wfp::WfpError>(())
 /// ```
 #[derive(Debug)]
 pub struct WfpEngine {
@@ -46,10 +46,10 @@ impl WfpEngine {
     /// # Examples
     ///
     /// ```no_run
-    /// use trusty_wfp::WfpEngine;
+    /// use windows_wfp::WfpEngine;
     ///
     /// let engine = WfpEngine::new()?;
-    /// # Ok::<(), trusty_wfp::WfpError>(())
+    /// # Ok::<(), windows_wfp::WfpError>(())
     /// ```
     pub fn new() -> WfpResult<Self> {
         Self::new_with_flags(FWPM_SESSION_FLAG_DYNAMIC)

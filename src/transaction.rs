@@ -17,7 +17,7 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
 /// # Examples
 ///
 /// ```no_run
-/// use trusty_wfp::{WfpEngine, WfpTransaction};
+/// use windows_wfp::{WfpEngine, WfpTransaction};
 ///
 /// let engine = WfpEngine::new()?;
 /// let mut txn = WfpTransaction::begin(&engine)?;
@@ -26,7 +26,7 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
 /// // If any operation fails, transaction will be rolled back automatically
 ///
 /// txn.commit()?; // Explicitly commit if all succeeded
-/// # Ok::<(), trusty_wfp::WfpError>(())
+/// # Ok::<(), windows_wfp::WfpError>(())
 /// ```
 pub struct WfpTransaction<'a> {
     /// Reference to the WFP engine
@@ -49,13 +49,13 @@ impl<'a> WfpTransaction<'a> {
     /// # Examples
     ///
     /// ```no_run
-    /// use trusty_wfp::{WfpEngine, WfpTransaction};
+    /// use windows_wfp::{WfpEngine, WfpTransaction};
     ///
     /// let engine = WfpEngine::new()?;
     /// let mut txn = WfpTransaction::begin(&engine)?;
     /// // Transaction active...
     /// txn.commit()?;
-    /// # Ok::<(), trusty_wfp::WfpError>(())
+    /// # Ok::<(), windows_wfp::WfpError>(())
     /// ```
     pub fn begin(engine: &'a WfpEngine) -> WfpResult<Self> {
         unsafe {
@@ -84,13 +84,13 @@ impl<'a> WfpTransaction<'a> {
     /// # Examples
     ///
     /// ```no_run
-    /// use trusty_wfp::{WfpEngine, WfpTransaction};
+    /// use windows_wfp::{WfpEngine, WfpTransaction};
     ///
     /// let engine = WfpEngine::new()?;
     /// let mut txn = WfpTransaction::begin(&engine)?;
     /// // Perform operations...
     /// txn.commit()?; // Make changes permanent
-    /// # Ok::<(), trusty_wfp::WfpError>(())
+    /// # Ok::<(), windows_wfp::WfpError>(())
     /// ```
     pub fn commit(mut self) -> WfpResult<()> {
         unsafe {

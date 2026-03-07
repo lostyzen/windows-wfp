@@ -24,7 +24,7 @@
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
-use trusty_wfp::{
+use windows_wfp::{
     initialize_wfp, Action, Direction, FilterBuilder, FilterRule, FilterWeight, NetworkEvent,
     WfpEngine, WfpEventSubscription, WfpResult,
 };

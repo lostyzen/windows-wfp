@@ -1,6 +1,6 @@
 //! WFP Provider and Sublayer management
 //!
-//! Handles registration of TRusTY Wall provider and sublayer in WFP.
+//! Handles registration of WFP provider and sublayer.
 
 use crate::constants::{TRUSTY_PROVIDER_GUID, TRUSTY_SUBLAYER_GUID};
 use crate::engine::WfpEngine;
@@ -32,11 +32,11 @@ impl WfpProvider {
     /// # Examples
     ///
     /// ```no_run
-    /// use trusty_wfp::{WfpEngine, WfpProvider};
+    /// use windows_wfp::{WfpEngine, WfpProvider};
     ///
     /// let engine = WfpEngine::new()?;
     /// WfpProvider::register(&engine)?;
-    /// # Ok::<(), trusty_wfp::WfpError>(())
+    /// # Ok::<(), windows_wfp::WfpError>(())
     /// ```
     pub fn register(engine: &WfpEngine) -> WfpResult<()> {
         // Keep wide strings alive for the duration of the function
@@ -102,12 +102,12 @@ impl WfpSublayer {
     /// # Examples
     ///
     /// ```no_run
-    /// use trusty_wfp::{WfpEngine, WfpProvider, WfpSublayer};
+    /// use windows_wfp::{WfpEngine, WfpProvider, WfpSublayer};
     ///
     /// let engine = WfpEngine::new()?;
     /// WfpProvider::register(&engine)?;
     /// WfpSublayer::register(&engine)?;
-    /// # Ok::<(), trusty_wfp::WfpError>(())
+    /// # Ok::<(), windows_wfp::WfpError>(())
     /// ```
     pub fn register(engine: &WfpEngine) -> WfpResult<()> {
         // Keep wide strings alive for the duration of the function
@@ -167,12 +167,12 @@ impl WfpSublayer {
 /// # Examples
 ///
 /// ```no_run
-/// use trusty_wfp::{WfpEngine, initialize_wfp};
+/// use windows_wfp::{WfpEngine, initialize_wfp};
 ///
 /// let engine = WfpEngine::new()?;
 /// initialize_wfp(&engine)?;
 /// // Now ready to add filters
-/// # Ok::<(), trusty_wfp::WfpError>(())
+/// # Ok::<(), windows_wfp::WfpError>(())
 /// ```
 pub fn initialize_wfp(engine: &WfpEngine) -> WfpResult<()> {
     let txn = WfpTransaction::begin(engine)?;
