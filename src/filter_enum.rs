@@ -76,7 +76,7 @@ pub struct FilterInfo {
 
 /// Enumerates WFP filters from the system
 ///
-/// Provides methods to list all active filters or filter by provider.
+/// Provides methods to list all active filters; callers can then filter by provider if desired.
 ///
 /// # Example
 ///
@@ -145,6 +145,9 @@ impl FilterEnumerator {
                 }
 
                 if num_returned == 0 {
+                    if !filter_array.is_null() {
+                        FwpmFreeMemory0(&mut filter_array as *mut _ as *mut *mut _);
+                    }
                     break;
                 }
 
@@ -209,6 +212,9 @@ impl FilterEnumerator {
                 }
 
                 if num_returned == 0 {
+                    if !filter_array.is_null() {
+                        FwpmFreeMemory0(&mut filter_array as *mut _ as *mut *mut _);
+                    }
                     break;
                 }
 
