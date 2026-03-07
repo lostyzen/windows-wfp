@@ -1,6 +1,6 @@
 [package]
 name = "windows-wfp"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Pierre <lostyzen@github.com>"]
 edition = "2021"
 rust-version = "1.75"
@@ -21,3 +21,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Threading",
 ] }
 thiserror = "2.0"
+
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc"]
