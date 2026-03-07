@@ -6,15 +6,17 @@ edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0"
 description = "Safe Rust wrapper for the Windows Filtering Platform (WFP) kernel-level firewall API"
-repository = "https://github.com/lostyzen/TRusTY-Wall"
+repository = "https://github.com/lostyzen/windows-wfp"
 documentation = "https://docs.rs/windows-wfp"
 readme = "README.md"
 keywords = ["windows", "firewall", "wfp", "network", "filter"]
 categories = ["os::windows-apis", "network-programming"]
 
 [dependencies]
-windows = { workspace = true }
-thiserror = { workspace = true }
-
-[build-dependencies]
-windows = { workspace = true }
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_WindowsFilteringPlatform",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
+thiserror = "2.0"

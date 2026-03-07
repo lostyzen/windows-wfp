@@ -129,4 +129,4 @@ cargo run --example list_filters --release
 
 ## License
 
-Licensed under GPL-2.0. See [LICENSE](../../LICENSE) for details.
+Licensed under GPL-2.0. See [LICENSE](LICENSE) for details.
