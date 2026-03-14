@@ -5,6 +5,7 @@
 
 use crate::condition::{IpAddrMask, Protocol};
 use crate::layer::FilterWeight;
+use std::fmt;
 use std::path::PathBuf;
 
 /// Direction of network traffic
@@ -16,6 +17,15 @@ pub enum Direction {
     Outbound,
 }
 
+impl fmt::Display for Direction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Direction::Inbound => write!(f, "Inbound"),
+            Direction::Outbound => write!(f, "Outbound"),
+        }
+    }
+}
+
 /// Action to take when a filter matches
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
@@ -23,6 +33,15 @@ pub enum Action {
     Permit,
     /// Block the traffic
     Block,
+}
+
+impl fmt::Display for Action {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Action::Permit => write!(f, "Permit"),
+            Action::Block => write!(f, "Block"),
+        }
+    }
 }
 
 /// A WFP filter rule definition
@@ -320,5 +339,17 @@ mod tests {
         let a2 = a1; // Copy
         assert_eq!(a1, a2);
         assert_ne!(Action::Permit, Action::Block);
+    }
+
+    #[test]
+    fn test_direction_display() {
+        assert_eq!(Direction::Inbound.to_string(), "Inbound");
+        assert_eq!(Direction::Outbound.to_string(), "Outbound");
+    }
+
+    #[test]
+    fn test_action_display() {
+        assert_eq!(Action::Permit.to_string(), "Permit");
+        assert_eq!(Action::Block.to_string(), "Block");
     }
 }

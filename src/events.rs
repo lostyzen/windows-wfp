@@ -83,6 +83,17 @@ impl From<u32> for NetworkEventType {
     }
 }
 
+impl std::fmt::Display for NetworkEventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NetworkEventType::ClassifyDrop => write!(f, "ClassifyDrop"),
+            NetworkEventType::ClassifyAllow => write!(f, "ClassifyAllow"),
+            NetworkEventType::CapabilityDrop => write!(f, "CapabilityDrop"),
+            NetworkEventType::Other(n) => write!(f, "Other({})", n),
+        }
+    }
+}
+
 /// WFP Event Subscription Handle
 ///
 /// RAII wrapper for WFP event subscription. Automatically unsubscribes on drop.
@@ -92,6 +103,9 @@ pub struct WfpEventSubscription {
     subscription_handle: HANDLE,
     _callback: Box<FWPM_NET_EVENT_CALLBACK0>, // Keep callback alive
     receiver: mpsc::Receiver<NetworkEvent>,
+    /// Raw pointer to the boxed `Sender<NetworkEvent>` used as the WFP callback context.
+    /// Must be freed after `FwpmNetEventUnsubscribe0` to avoid a memory leak.
+    sender_context: *mut c_void,
 }
 
 impl WfpEventSubscription {
@@ -108,7 +122,7 @@ impl WfpEventSubscription {
 
         // Box the channel sender so it has a stable address for the context pointer
         let sender_box = Box::new(sender);
-        let context = Box::into_raw(sender_box) as *const c_void;
+        let context = Box::into_raw(sender_box) as *mut c_void;
 
         // Create the callback function
         let callback: FWPM_NET_EVENT_CALLBACK0 = Some(event_callback);
@@ -127,13 +141,13 @@ impl WfpEventSubscription {
                 engine.handle(),
                 &subscription,
                 callback,
-                Some(context),
+                Some(context as *const c_void),
                 &mut subscription_handle,
             );
 
             if result != ERROR_SUCCESS.0 {
                 // Clean up the boxed sender on error
-                let _ = Box::from_raw(context as *mut mpsc::Sender<NetworkEvent>);
+                drop(Box::from_raw(context as *mut mpsc::Sender<NetworkEvent>));
                 return Err(WfpError::Other(format!(
                     "Failed to subscribe to WFP events: error code {}",
                     result
@@ -146,6 +160,7 @@ impl WfpEventSubscription {
             subscription_handle,
             _callback: Box::new(callback), // Keep callback alive to prevent GC
             receiver,
+            sender_context: context,
         })
     }
 
@@ -169,7 +184,17 @@ impl Drop for WfpEventSubscription {
     fn drop(&mut self) {
         if !self.subscription_handle.is_invalid() && !self.engine.is_null() {
             unsafe {
+                // Unsubscribe first so no more callbacks can fire before we free the context
                 let _ = FwpmNetEventUnsubscribe0((*self.engine).handle(), self.subscription_handle);
+            }
+        }
+        // Free the boxed Sender that was passed as the WFP callback context.
+        // Safe to do now because WfpmNetEventUnsubscribe0 guarantees no further callbacks.
+        if !self.sender_context.is_null() {
+            unsafe {
+                drop(Box::from_raw(
+                    self.sender_context as *mut mpsc::Sender<NetworkEvent>,
+                ));
             }
         }
     }
@@ -440,5 +465,13 @@ mod tests {
         assert_eq!(cloned.event_type, NetworkEventType::ClassifyAllow);
         assert_eq!(cloned.protocol, 17);
         assert!(cloned.app_path.is_none());
+    }
+
+    #[test]
+    fn test_network_event_type_display() {
+        assert_eq!(NetworkEventType::ClassifyDrop.to_string(), "ClassifyDrop");
+        assert_eq!(NetworkEventType::ClassifyAllow.to_string(), "ClassifyAllow");
+        assert_eq!(NetworkEventType::CapabilityDrop.to_string(), "CapabilityDrop");
+        assert_eq!(NetworkEventType::Other(42).to_string(), "Other(42)");
     }
 }

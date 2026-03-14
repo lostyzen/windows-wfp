@@ -3,6 +3,7 @@
 //! Types used as filter conditions in WFP rules: IP addresses with masks,
 //! and IP protocol numbers.
 
+use std::fmt;
 use std::net::IpAddr;
 
 /// IP address with CIDR prefix length
@@ -124,6 +125,22 @@ impl Protocol {
     }
 }
 
+impl fmt::Display for Protocol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Protocol::Hopopt => write!(f, "HOPOPT"),
+            Protocol::Icmp => write!(f, "ICMP"),
+            Protocol::Igmp => write!(f, "IGMP"),
+            Protocol::Tcp => write!(f, "TCP"),
+            Protocol::Udp => write!(f, "UDP"),
+            Protocol::Gre => write!(f, "GRE"),
+            Protocol::Esp => write!(f, "ESP"),
+            Protocol::Ah => write!(f, "AH"),
+            Protocol::Icmpv6 => write!(f, "ICMPv6"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +243,18 @@ mod tests {
         let p = Protocol::Tcp;
         let p2 = p; // Copy
         assert_eq!(p, p2);
+    }
+
+    #[test]
+    fn test_protocol_display() {
+        assert_eq!(Protocol::Tcp.to_string(), "TCP");
+        assert_eq!(Protocol::Udp.to_string(), "UDP");
+        assert_eq!(Protocol::Icmp.to_string(), "ICMP");
+        assert_eq!(Protocol::Icmpv6.to_string(), "ICMPv6");
+        assert_eq!(Protocol::Gre.to_string(), "GRE");
+        assert_eq!(Protocol::Esp.to_string(), "ESP");
+        assert_eq!(Protocol::Ah.to_string(), "AH");
+        assert_eq!(Protocol::Igmp.to_string(), "IGMP");
+        assert_eq!(Protocol::Hopopt.to_string(), "HOPOPT");
     }
 }

@@ -117,11 +117,12 @@ impl FilterBuilder {
     /// # Ok::<(), windows_wfp::WfpError>(())
     /// ```
     pub fn add_filter(engine: &WfpEngine, rule: &FilterRule) -> WfpResult<u64> {
-        // Determine if rule uses IPv6 (based on remote_ip if present)
+        // Determine if rule uses IPv6 (check both remote_ip and local_ip)
         let is_ipv6 = rule
             .remote_ip
             .as_ref()
-            .map(|ip_mask| matches!(ip_mask.addr, IpAddr::V6(_)))
+            .map(|ip| ip.is_ipv6())
+            .or_else(|| rule.local_ip.as_ref().map(|ip| ip.is_ipv6()))
             .unwrap_or(false);
 
         let layer_key = layer::select_layer(rule.direction, is_ipv6);
@@ -133,23 +134,27 @@ impl FilterBuilder {
         // Weight storage - must outlive FwpmFilterAdd0 call
         let weight_value: u64 = rule.weight;
 
-        // CRITICAL: Convert DOS path to NT kernel format using FwpmGetAppIdFromFileName0
-        let app_id_blob: Option<(*mut FWP_BYTE_BLOB, bool)> =
-            rule.app_path.as_ref().and_then(|app_path| unsafe {
-                let path_str = app_path.to_string_lossy().to_string();
-                let path_wide: Vec<u16> =
-                    path_str.encode_utf16().chain(std::iter::once(0)).collect();
-                let pwstr = PWSTR(path_wide.as_ptr() as *mut u16);
+        // CRITICAL: Convert DOS path to NT kernel format using FwpmGetAppIdFromFileName0.
+        // If the conversion fails (e.g. file not found), return an error instead of silently
+        // skipping the condition, which would cause the filter to match ALL applications.
+        let app_id_blob: Option<*mut FWP_BYTE_BLOB> = if let Some(app_path) = &rule.app_path {
+            let path_str = app_path.to_string_lossy().to_string();
+            // path_wide must remain alive for the duration of the API call
+            let path_wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
 
-                let mut blob_ptr: *mut FWP_BYTE_BLOB = ptr::null_mut();
-                let result = FwpmGetAppIdFromFileName0(pwstr, &mut blob_ptr);
+            let mut blob_ptr: *mut FWP_BYTE_BLOB = ptr::null_mut();
+            let result = unsafe {
+                FwpmGetAppIdFromFileName0(PWSTR(path_wide.as_ptr() as *mut u16), &mut blob_ptr)
+            };
 
-                if result == ERROR_SUCCESS.0 {
-                    Some((blob_ptr, true))
-                } else {
-                    None
-                }
-            });
+            if result != ERROR_SUCCESS.0 {
+                return Err(WfpError::AppPathNotFound(path_str));
+            }
+
+            Some(blob_ptr)
+        } else {
+            None
+        };
 
         let remote_v4_mask: Option<FWP_V4_ADDR_AND_MASK> =
             rule.remote_ip.as_ref().and_then(|remote_ip| {
@@ -203,7 +208,7 @@ impl FilterBuilder {
         let mut conditions = Vec::new();
 
         // Condition: APP_ID (application path in NT kernel format)
-        if let Some((blob_ptr, _)) = app_id_blob {
+        if let Some(blob_ptr) = app_id_blob {
             conditions.push(FWPM_FILTER_CONDITION0 {
                 fieldKey: CONDITION_ALE_APP_ID,
                 matchType: FWP_MATCH_EQUAL,
@@ -360,8 +365,8 @@ impl FilterBuilder {
             let result = FwpmFilterAdd0(engine.handle(), &filter, None, Some(&mut filter_id));
 
             // Free memory allocated by FwpmGetAppIdFromFileName0 regardless of add result
-            if let Some((mut blob_ptr, needs_free)) = app_id_blob {
-                if needs_free && !blob_ptr.is_null() {
+            if let Some(mut blob_ptr) = app_id_blob {
+                if !blob_ptr.is_null() {
                     FwpmFreeMemory0(&mut blob_ptr as *mut _ as *mut *mut _);
                 }
             }
@@ -498,5 +503,22 @@ mod tests {
         let result = FilterBuilder::delete_filter(&engine, filter_id);
 
         assert!(result.is_ok(), "Failed to delete filter: {:?}", result);
+    }
+
+    #[test]
+    #[ignore] // Requires admin privileges
+    fn test_add_filter_with_nonexistent_app_path_returns_error() {
+        let engine = WfpEngine::new().expect("Failed to create engine");
+        crate::initialize_wfp(&engine).expect("Failed to initialize WFP");
+
+        let rule = FilterRule::new("Test", crate::Direction::Outbound, crate::Action::Block)
+            .with_app_path(r"C:\this\path\does\not\exist.exe");
+
+        let result = FilterBuilder::add_filter(&engine, &rule);
+        assert!(
+            matches!(result, Err(WfpError::AppPathNotFound(_))),
+            "Expected AppPathNotFound, got: {:?}",
+            result
+        );
     }
 }

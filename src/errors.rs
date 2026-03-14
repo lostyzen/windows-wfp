@@ -36,6 +36,13 @@ pub enum WfpError {
     #[error("Failed to abort WFP transaction")]
     TransactionAbortFailed,
 
+    /// Application path not found or could not be converted to NT kernel format
+    ///
+    /// This error occurs when `FwpmGetAppIdFromFileName0` fails, typically because
+    /// the executable does not exist at the specified path.
+    #[error("Application path not found or invalid: {0}")]
+    AppPathNotFound(String),
+
     /// Insufficient permissions (must run as administrator)
     #[error("Insufficient permissions - administrator privileges required")]
     InsufficientPermissions,
@@ -98,6 +105,10 @@ mod tests {
         assert_eq!(
             WfpError::TransactionAbortFailed.to_string(),
             "Failed to abort WFP transaction"
+        );
+        assert_eq!(
+            WfpError::AppPathNotFound(r"C:\missing.exe".into()).to_string(),
+            r"Application path not found or invalid: C:\missing.exe"
         );
     }
 

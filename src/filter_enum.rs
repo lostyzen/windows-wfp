@@ -107,78 +107,39 @@ impl FilterEnumerator {
     /// Returns an error if the enumeration handle cannot be created or enumeration fails.
     /// Requires administrator privileges.
     pub fn all(engine: &WfpEngine) -> WfpResult<Vec<FilterInfo>> {
-        let mut enum_handle = HANDLE::default();
-
-        unsafe {
-            let result = FwpmFilterCreateEnumHandle0(engine.handle(), None, &mut enum_handle);
-
-            if result != ERROR_SUCCESS.0 {
-                return Err(WfpError::Other(format!(
-                    "Failed to create filter enum handle: error code {}",
-                    result
-                )));
-            }
-        }
-
-        let mut filters = Vec::new();
-        let batch_size = 100;
-
-        loop {
-            let mut filter_array: *mut *mut FWPM_FILTER0 = ptr::null_mut();
-            let mut num_returned: u32 = 0;
-
-            unsafe {
-                let result = FwpmFilterEnum0(
-                    engine.handle(),
-                    enum_handle,
-                    batch_size,
-                    &mut filter_array,
-                    &mut num_returned,
-                );
-
-                if result != ERROR_SUCCESS.0 {
-                    let _ = FwpmFilterDestroyEnumHandle0(engine.handle(), enum_handle);
-                    return Err(WfpError::Other(format!(
-                        "Failed to enumerate filters: error code {}",
-                        result
-                    )));
-                }
-
-                if num_returned == 0 {
-                    if !filter_array.is_null() {
-                        FwpmFreeMemory0(&mut filter_array as *mut _ as *mut *mut _);
-                    }
-                    break;
-                }
-
-                for i in 0..num_returned {
+        Self::enumerate_raw(engine, |filter_array, num_returned, acc: &mut Vec<FilterInfo>| {
+            for i in 0..num_returned {
+                unsafe {
                     let filter = &**filter_array.offset(i as isize);
-                    filters.push(parse_filter(filter));
-                }
-
-                if !filter_array.is_null() {
-                    FwpmFreeMemory0(&mut filter_array as *mut _ as *mut *mut _);
+                    acc.push(parse_filter(filter));
                 }
             }
-        }
-
-        unsafe {
-            let _ = FwpmFilterDestroyEnumHandle0(engine.handle(), enum_handle);
-        }
-
-        Ok(filters)
+        })
     }
 
     /// Count all active WFP filters without collecting details
     ///
-    /// Only counts filters without parsing their contents, avoiding
-    /// string allocations and condition extraction.
+    /// Counts filters without parsing their display names or conditions.
+    /// Requires administrator privileges.
     pub fn count(engine: &WfpEngine) -> WfpResult<usize> {
+        Self::enumerate_raw(engine, |_filter_array, num_returned, acc: &mut usize| {
+            *acc += num_returned as usize;
+        })
+    }
+
+    /// Internal helper: create an enum handle, iterate batches, accumulate results, then destroy the handle.
+    ///
+    /// `visitor` is called for each batch with the raw filter pointer array, the number of
+    /// filters returned in that batch, and a mutable reference to the accumulator.
+    fn enumerate_raw<T, F>(engine: &WfpEngine, mut visitor: F) -> WfpResult<T>
+    where
+        T: Default,
+        F: FnMut(*mut *mut FWPM_FILTER0, u32, &mut T),
+    {
         let mut enum_handle = HANDLE::default();
 
         unsafe {
             let result = FwpmFilterCreateEnumHandle0(engine.handle(), None, &mut enum_handle);
-
             if result != ERROR_SUCCESS.0 {
                 return Err(WfpError::Other(format!(
                     "Failed to create filter enum handle: error code {}",
@@ -187,39 +148,45 @@ impl FilterEnumerator {
             }
         }
 
-        let mut count: usize = 0;
+        let mut accumulator = T::default();
         let batch_size = 100;
 
         loop {
             let mut filter_array: *mut *mut FWPM_FILTER0 = ptr::null_mut();
             let mut num_returned: u32 = 0;
 
-            unsafe {
-                let result = FwpmFilterEnum0(
+            let result = unsafe {
+                FwpmFilterEnum0(
                     engine.handle(),
                     enum_handle,
                     batch_size,
                     &mut filter_array,
                     &mut num_returned,
-                );
+                )
+            };
 
-                if result != ERROR_SUCCESS.0 {
+            if result != ERROR_SUCCESS.0 {
+                unsafe {
                     let _ = FwpmFilterDestroyEnumHandle0(engine.handle(), enum_handle);
-                    return Err(WfpError::Other(format!(
-                        "Failed to enumerate filters: error code {}",
-                        result
-                    )));
                 }
+                return Err(WfpError::Other(format!(
+                    "Failed to enumerate filters: error code {}",
+                    result
+                )));
+            }
 
-                if num_returned == 0 {
+            if num_returned == 0 {
+                unsafe {
                     if !filter_array.is_null() {
                         FwpmFreeMemory0(&mut filter_array as *mut _ as *mut *mut _);
                     }
-                    break;
                 }
+                break;
+            }
 
-                count += num_returned as usize;
+            visitor(filter_array, num_returned, &mut accumulator);
 
+            unsafe {
                 if !filter_array.is_null() {
                     FwpmFreeMemory0(&mut filter_array as *mut _ as *mut *mut _);
                 }
@@ -230,7 +197,7 @@ impl FilterEnumerator {
             let _ = FwpmFilterDestroyEnumHandle0(engine.handle(), enum_handle);
         }
 
-        Ok(count)
+        Ok(accumulator)
     }
 }
 
