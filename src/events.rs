@@ -200,6 +200,11 @@ impl Drop for WfpEventSubscription {
     }
 }
 
+// WfpEventSubscription is Send because the WFP event callback is single-threaded
+// (events are serialized by the WFP worker thread) and the sender channel
+// is only written from that single callback thread.
+unsafe impl Send for WfpEventSubscription {}
+
 /// Native callback function invoked by WFP (runs on WFP worker thread)
 ///
 /// # Safety
@@ -471,7 +476,10 @@ mod tests {
     fn test_network_event_type_display() {
         assert_eq!(NetworkEventType::ClassifyDrop.to_string(), "ClassifyDrop");
         assert_eq!(NetworkEventType::ClassifyAllow.to_string(), "ClassifyAllow");
-        assert_eq!(NetworkEventType::CapabilityDrop.to_string(), "CapabilityDrop");
+        assert_eq!(
+            NetworkEventType::CapabilityDrop.to_string(),
+            "CapabilityDrop"
+        );
         assert_eq!(NetworkEventType::Other(42).to_string(), "Other(42)");
     }
 }

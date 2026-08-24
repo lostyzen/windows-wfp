@@ -33,12 +33,17 @@ use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
 use crate::filter::{Action, FilterRule};
 use crate::layer;
+use crate::constants::WFP_SUBLAYER_GUID;
+use std::ffi::OsString;
 use std::net::IpAddr;
+use std::os::windows::ffi::OsStringExt;
 use std::ptr;
 use windows::core::{GUID, PWSTR};
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FwpmFilterAdd0, FwpmFilterDeleteById0, FwpmFreeMemory0, FwpmGetAppIdFromFileName0,
+    FwpmFilterAdd0, FwpmFilterDeleteById0, FwpmFilterCreateEnumHandle0,
+    FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0, FwpmFreeMemory0,
+    FwpmGetAppIdFromFileName0,
     FWPM_FILTER0, FWPM_FILTER_CONDITION0, FWPM_FILTER_FLAGS, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT,
     FWP_ACTION_TYPE, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0, FWP_MATCH_EQUAL,
     FWP_UINT16, FWP_UINT64, FWP_UINT8, FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK,
@@ -420,6 +425,87 @@ impl FilterBuilder {
 
         Ok(())
     }
+
+    /// Clear all filters in the windows-wfp sublayer
+    ///
+    /// Enumerates all filters in the system, keeps only those that do NOT
+    /// belong to our sublayer, and deletes the rest.  This is used to
+    /// flush the firewall before re-applying a fresh rule set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if enumeration or deletion fails.
+    pub fn clear_sublayer_filters(engine: &WfpEngine) -> WfpResult<()> {
+        let filters = Self::enumerate_sublayer_filters(engine)?;
+
+        for filter_id in filters {
+            if let Err(e) = Self::delete_filter(engine, filter_id) {
+                eprintln!("WARN: Failed to clear filter {}: {}", filter_id, e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Enumerate filter IDs belonging to the windows-wfp sublayer.
+    fn enumerate_sublayer_filters(engine: &WfpEngine) -> WfpResult<Vec<u64>> {
+        let mut enum_handle = HANDLE::default();
+
+        unsafe {
+            let result =
+                FwpmFilterCreateEnumHandle0(engine.handle(), None, &mut enum_handle);
+            if result != ERROR_SUCCESS.0 {
+                return Err(WfpError::Other(format!(
+                    "Failed to create filter enum handle: error code {}",
+                    result
+                )));
+            }
+        }
+
+        let sublayer_key = WFP_SUBLAYER_GUID;
+        let mut filter_ids = Vec::new();
+        let mut pp_filters: *mut *mut *mut FWPM_FILTER0 = ptr::null_mut();
+        let mut num_filters: u32 = 0;
+
+        unsafe {
+            let result = FwpmFilterEnum0(
+                engine.handle(),
+                enum_handle,
+                0,
+                pp_filters,
+                &mut num_filters,
+            );
+            if result != ERROR_SUCCESS.0 {
+                FwpmFilterDestroyEnumHandle0(engine.handle(), enum_handle);
+                return Err(WfpError::Other(format!(
+                    "Failed to enumerate filters: error code {}",
+                    result
+                )));
+            }
+
+            if num_filters > 0 && !pp_filters.is_null() {
+                let ptr_array = *pp_filters;
+                if !ptr_array.is_null() {
+                    let filters_slice =
+                        std::slice::from_raw_parts(ptr_array, num_filters as usize);
+                    for &f_ptr in filters_slice {
+                        let f = &*f_ptr;
+                        if f.subLayerKey == sublayer_key {
+                            filter_ids.push(f.filterId);
+                        }
+                    }
+                }
+                // FwpmFreeMemory0 expects *mut *mut c_void — same layout as
+                // *mut *mut *mut FWPM_FILTER0 in practice.
+                FwpmFreeMemory0(pp_filters as *mut *mut _);
+            }
+
+            FwpmFilterDestroyEnumHandle0(engine.handle(), enum_handle);
+        }
+
+        Ok(filter_ids)
+    }
+
 }
 
 #[cfg(test)]

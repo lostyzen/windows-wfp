@@ -50,6 +50,21 @@ impl FilterWeight {
     pub fn value(self) -> u64 {
         self as u64
     }
+
+    /// Convert a `u64` back to the closest matching `FilterWeight`.
+    /// Returns `None` for values that don't match a known weight.
+    pub fn try_from_u64(value: u64) -> Option<Self> {
+        match value {
+            9_000_000 => Some(Self::Blocklist),
+            8_000_000 => Some(Self::RawSocketPermit),
+            7_000_000 => Some(Self::RawSocketBlock),
+            6_000_000 => Some(Self::UserBlock),
+            5_000_000 => Some(Self::UserPermit),
+            4_000_000 => Some(Self::DefaultPermit),
+            3_000_000 => Some(Self::DefaultBlock),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
