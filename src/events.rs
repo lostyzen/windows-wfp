@@ -200,6 +200,15 @@ impl Drop for WfpEventSubscription {
     }
 }
 
+// SAFETY: WfpEventSubscription is Send because the WFP subscription handle and callback
+// context can be safely transferred between threads. The raw `engine` pointer is only
+// dereferenced in `Drop::drop` to call `FwpmNetEventUnsubscribe0`; callers must ensure the
+// borrowed `WfpEngine` outlives this subscription (e.g. by declaring it after the engine in
+// a containing struct, so it drops first).
+unsafe impl Send for WfpEventSubscription {}
+
+// WfpEventSubscription is NOT Sync: the mpsc::Receiver requires exclusive access.
+
 /// Native callback function invoked by WFP (runs on WFP worker thread)
 ///
 /// # Safety
@@ -471,7 +480,10 @@ mod tests {
     fn test_network_event_type_display() {
         assert_eq!(NetworkEventType::ClassifyDrop.to_string(), "ClassifyDrop");
         assert_eq!(NetworkEventType::ClassifyAllow.to_string(), "ClassifyAllow");
-        assert_eq!(NetworkEventType::CapabilityDrop.to_string(), "CapabilityDrop");
+        assert_eq!(
+            NetworkEventType::CapabilityDrop.to_string(),
+            "CapabilityDrop"
+        );
         assert_eq!(NetworkEventType::Other(42).to_string(), "Other(42)");
     }
 }

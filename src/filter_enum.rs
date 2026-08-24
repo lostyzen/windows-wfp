@@ -107,14 +107,17 @@ impl FilterEnumerator {
     /// Returns an error if the enumeration handle cannot be created or enumeration fails.
     /// Requires administrator privileges.
     pub fn all(engine: &WfpEngine) -> WfpResult<Vec<FilterInfo>> {
-        Self::enumerate_raw(engine, |filter_array, num_returned, acc: &mut Vec<FilterInfo>| {
-            for i in 0..num_returned {
-                unsafe {
-                    let filter = &**filter_array.offset(i as isize);
-                    acc.push(parse_filter(filter));
+        Self::enumerate_raw(
+            engine,
+            |filter_array, num_returned, acc: &mut Vec<FilterInfo>| {
+                for i in 0..num_returned {
+                    unsafe {
+                        let filter = &**filter_array.offset(i as isize);
+                        acc.push(parse_filter(filter));
+                    }
                 }
-            }
-        })
+            },
+        )
     }
 
     /// Count all active WFP filters without collecting details
