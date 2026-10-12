@@ -42,6 +42,16 @@ pub enum WfpError {
     #[error("Invalid address: {0}")]
     InvalidAddress(String),
 
+    /// Adding a rule failed and filters already created for it could not be removed
+    #[error("{error}; rollback failed, filters still active: {active_filter_ids:?}")]
+    RollbackFailed {
+        /// Error that interrupted the rule installation
+        #[source]
+        error: Box<WfpError>,
+        /// WFP filter IDs left in place
+        active_filter_ids: Vec<u64>,
+    },
+
     /// Insufficient permissions (must run as administrator)
     #[error("Insufficient permissions - administrator privileges required")]
     InsufficientPermissions,
@@ -119,6 +129,19 @@ mod tests {
     #[test]
     fn test_check_success() {
         assert!(WfpError::check("FwpmFilterAdd0", 0).is_ok());
+    }
+
+    #[test]
+    fn test_rollback_failed_reports_cause_and_ids() {
+        let err = WfpError::RollbackFailed {
+            error: Box::new(WfpError::InvalidRule("v6".into())),
+            active_filter_ids: vec![42],
+        };
+        assert_eq!(
+            err.to_string(),
+            "Invalid filter rule: v6; rollback failed, filters still active: [42]"
+        );
+        assert!(std::error::Error::source(&err).is_some());
     }
 
     #[test]

@@ -34,6 +34,7 @@ use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
 use crate::filter::{Action, FilterRule};
 use crate::layer;
+use crate::transaction::WfpTransaction;
 use std::net::IpAddr;
 use std::ptr;
 use windows::core::{GUID, PWSTR};
@@ -218,12 +219,18 @@ impl FilterBuilder {
     /// Rules without IPv4/IPv6-specific conditions are installed on both the IPv4
     /// and IPv6 layers so they cannot be bypassed over the other IP family.
     ///
+    /// The operation is all-or-nothing: it runs in its own WFP transaction, or, when
+    /// called inside a caller's [`WfpTransaction`], removes the filters it already added
+    /// if a later one fails.
+    ///
     /// # Errors
     ///
     /// - `WfpError::UnsupportedCondition` if the rule uses a condition not yet translated
     /// - `WfpError::InvalidRule` if the rule mixes IPv4 and IPv6 conditions
     /// - `WfpError::AppPathNotFound` if the application path cannot be resolved
     /// - `WfpError::Api` if WFP rejects the filter
+    /// - `WfpError::RollbackFailed` if, inside a caller's transaction, filters already
+    ///   added could not be removed (their IDs are reported; abort the transaction or delete them)
     ///
     /// # Examples
     ///
@@ -245,20 +252,40 @@ impl FilterBuilder {
         // DOS paths never match in the kernel: WFP needs the NT path produced here.
         let app_id = rule.app_path.as_deref().map(AppId::from_path).transpose()?;
 
+        // WFP forbids nested transactions: inside a caller's one, roll back by hand.
+        let txn = WfpTransaction::begin_unless_in_progress(engine)?;
+
         let mut ids = Vec::with_capacity(families.len());
         for family in families {
             match Self::add_filter_for_family(engine, rule, family, app_id.as_ref()) {
                 Ok(id) => ids.push(id),
-                Err(err) => {
-                    for id in ids {
-                        let _ = Self::delete_filter_by_id(engine, id);
-                    }
-                    return Err(err);
-                }
+                // Dropping `txn` aborts every add made in it
+                Err(err) if txn.is_some() => return Err(err),
+                Err(err) => return Err(Self::rollback(engine, ids, err)),
             }
         }
 
+        if let Some(txn) = txn {
+            txn.commit()?;
+        }
         Ok(FilterHandle { ids })
+    }
+
+    /// Delete filters added before `error`; report those that could not be removed
+    fn rollback(engine: &WfpEngine, ids: Vec<u64>, error: WfpError) -> WfpError {
+        let active_filter_ids: Vec<u64> = ids
+            .into_iter()
+            .filter(|&id| Self::delete_filter_by_id(engine, id).is_err())
+            .collect();
+
+        if active_filter_ids.is_empty() {
+            error
+        } else {
+            WfpError::RollbackFailed {
+                error: Box::new(error),
+                active_filter_ids,
+            }
+        }
     }
 
     fn add_filter_for_family(
@@ -624,6 +651,21 @@ mod tests {
         let result = FilterBuilder::delete_filter(&engine, &filter);
 
         assert!(result.is_ok(), "Failed to delete filter: {:?}", result);
+    }
+
+    #[test]
+    #[ignore] // Requires admin privileges
+    fn test_add_filter_inside_caller_transaction() {
+        let engine = WfpEngine::new().expect("Failed to create engine");
+        crate::initialize_wfp(&engine).expect("Failed to initialize WFP");
+
+        let txn = WfpTransaction::begin(&engine).expect("Failed to begin transaction");
+        let filter = FilterBuilder::add_filter(&engine, &FilterRule::allow_all_outbound())
+            .expect("add_filter must work inside a caller transaction");
+        txn.commit().expect("Failed to commit");
+
+        assert_eq!(filter.ids().len(), 2);
+        FilterBuilder::delete_filter(&engine, &filter).expect("Failed to delete filter");
     }
 
     #[test]
