@@ -104,6 +104,22 @@ instead of silently matching all traffic):
 - **Windows service name**
 - **AppContainer SID**
 
+## Rule Validation
+
+`FilterRule::new(name, direction, action)` is all a rule needs; every condition is optional
+and a rule without conditions matches all traffic in that direction. Before calling WFP,
+`FilterBuilder::add_filter` checks the rule, in this order:
+
+| Check | Error |
+|---|---|
+| No unsupported condition (`service_name`, `app_container_sid`) | `WfpError::UnsupportedCondition` |
+| CIDR prefix within range (≤ /32 for IPv4, ≤ /128 for IPv6) | `WfpError::InvalidAddress` |
+| Remote IP, local IP and ICMP/ICMPv6 protocol all target the same IP family | `WfpError::InvalidRule` |
+| `app_path` points to an existing executable | `WfpError::AppPathNotFound` |
+
+A rejected rule installs nothing. Once these checks pass, the remaining failures come from
+WFP itself (`WfpError::Api`), e.g. missing Administrator rights or `initialize_wfp` not called.
+
 ## Path Conversion
 
 WFP operates at the kernel level and requires NT kernel paths, not DOS paths:
