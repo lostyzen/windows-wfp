@@ -4,7 +4,6 @@
 
 use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
-use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmTransactionAbort0, FwpmTransactionBegin0, FwpmTransactionCommit0,
 };
@@ -42,7 +41,7 @@ impl<'a> WfpTransaction<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `WfpError::TransactionBeginFailed` if:
+    /// Returns `WfpError::Api` (e.g. `FWP_E_TXN_IN_PROGRESS`) if:
     /// - Another transaction is already active on this session
     /// - WFP engine session is invalid
     ///
@@ -58,13 +57,8 @@ impl<'a> WfpTransaction<'a> {
     /// # Ok::<(), windows_wfp::WfpError>(())
     /// ```
     pub fn begin(engine: &'a WfpEngine) -> WfpResult<Self> {
-        unsafe {
-            let result = FwpmTransactionBegin0(engine.handle(), 0);
-
-            if result != ERROR_SUCCESS.0 {
-                return Err(WfpError::TransactionBeginFailed);
-            }
-        }
+        let result = unsafe { FwpmTransactionBegin0(engine.handle(), 0) };
+        WfpError::check("FwpmTransactionBegin0", result)?;
 
         Ok(Self {
             engine,
@@ -79,7 +73,7 @@ impl<'a> WfpTransaction<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `WfpError::TransactionCommitFailed` if the commit operation fails.
+    /// Returns `WfpError::Api` if the commit operation fails.
     ///
     /// # Examples
     ///
@@ -93,13 +87,9 @@ impl<'a> WfpTransaction<'a> {
     /// # Ok::<(), windows_wfp::WfpError>(())
     /// ```
     pub fn commit(mut self) -> WfpResult<()> {
-        unsafe {
-            let result = FwpmTransactionCommit0(self.engine.handle());
-
-            if result != ERROR_SUCCESS.0 {
-                return Err(WfpError::TransactionCommitFailed);
-            }
-        }
+        let result = unsafe { FwpmTransactionCommit0(self.engine.handle()) };
+        // A failed commit leaves the transaction to be aborted by Drop
+        WfpError::check("FwpmTransactionCommit0", result)?;
 
         self.committed = true;
         Ok(())
@@ -112,18 +102,11 @@ impl<'a> WfpTransaction<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `WfpError::TransactionAbortFailed` if the abort operation fails.
+    /// Returns `WfpError::Api` if the abort operation fails.
     pub fn rollback(mut self) -> WfpResult<()> {
-        unsafe {
-            let result = FwpmTransactionAbort0(self.engine.handle());
-
-            if result != ERROR_SUCCESS.0 {
-                return Err(WfpError::TransactionAbortFailed);
-            }
-        }
-
+        let result = unsafe { FwpmTransactionAbort0(self.engine.handle()) };
         self.committed = true; // Prevent double-abort in drop
-        Ok(())
+        WfpError::check("FwpmTransactionAbort0", result)
     }
 
     /// Check if transaction has been committed

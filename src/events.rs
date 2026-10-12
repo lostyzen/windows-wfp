@@ -3,24 +3,35 @@
 //! Subscribes to WFP network events to monitor blocked connections.
 //! Used for learning mode where blocked traffic is logged for auto-whitelisting.
 
+use crate::app_id::app_id_to_path;
 use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
-use std::ffi::{c_void, OsString};
+use std::ffi::c_void;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::ptr;
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime};
 use windows::core::GUID;
-use windows::Win32::Foundation::{ERROR_SUCCESS, FILETIME, HANDLE};
+use windows::Win32::Foundation::{FILETIME, HANDLE};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FwpmNetEventSubscribe0, FwpmNetEventUnsubscribe0, FWPM_NET_EVENT1, FWPM_NET_EVENT_SUBSCRIPTION0,
+    FwpmEngineGetOption0, FwpmEngineSetOption0, FwpmFreeMemory0, FwpmNetEventSubscribe1,
+    FwpmNetEventUnsubscribe0, FWPM_ENGINE_COLLECT_NET_EVENTS,
+    FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS, FWPM_ENGINE_OPTION, FWPM_NET_EVENT2,
+    FWPM_NET_EVENT_FLAG_APP_ID_SET, FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET,
+    FWPM_NET_EVENT_FLAG_IP_VERSION_SET, FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET,
+    FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET, FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET,
+    FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET, FWPM_NET_EVENT_KEYWORD_CLASSIFY_ALLOW,
+    FWPM_NET_EVENT_SUBSCRIPTION0, FWPM_NET_EVENT_TYPE_CAPABILITY_DROP,
+    FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW, FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, FWP_IP_VERSION_V4,
+    FWP_IP_VERSION_V6, FWP_UINT32, FWP_VALUE0, FWP_VALUE0_0,
 };
 
 /// Network event from WFP
 ///
 /// Represents a network event captured by the Windows Filtering Platform.
 /// Used in learning mode to identify applications that were blocked.
+/// Fields are `None` when WFP did not provide the information for this event.
 #[derive(Debug, Clone)]
 pub struct NetworkEvent {
     /// When the event occurred
@@ -29,11 +40,11 @@ pub struct NetworkEvent {
     /// Type of event (Classify Drop, Classify Allow, etc.)
     pub event_type: NetworkEventType,
 
-    /// Application path that triggered the event (if available)
+    /// Application path in NT kernel format (e.g. `\device\harddiskvolume3\...\app.exe`)
     pub app_path: Option<PathBuf>,
 
     /// IP protocol (TCP=6, UDP=17, etc.)
-    pub protocol: u8,
+    pub protocol: Option<u8>,
 
     /// Local IP address
     pub local_addr: Option<IpAddr>,
@@ -42,15 +53,15 @@ pub struct NetworkEvent {
     pub remote_addr: Option<IpAddr>,
 
     /// Local port
-    pub local_port: u16,
+    pub local_port: Option<u16>,
 
     /// Remote port
-    pub remote_port: u16,
+    pub remote_port: Option<u16>,
 
-    /// Filter ID that triggered the event (for CLASSIFY_DROP)
+    /// Filter ID that triggered the event (ClassifyDrop, ClassifyAllow, CapabilityDrop)
     pub filter_id: Option<u64>,
 
-    /// Layer ID where event occurred
+    /// Layer ID where event occurred (ClassifyDrop, ClassifyAllow)
     pub layer_id: Option<u16>,
 }
 
@@ -61,10 +72,11 @@ pub enum NetworkEventType {
     /// Connection was blocked by a filter
     ClassifyDrop = 3,
 
-    /// Connection was allowed by a filter (Win8+)
+    /// Connection was allowed by a filter (only collected when enabled, see
+    /// [`WfpEngine::set_classify_allow_events`])
     ClassifyAllow = 6,
 
-    /// App container capability drop (Win8+)
+    /// App container capability drop
     CapabilityDrop = 7,
 
     /// Other event type
@@ -133,22 +145,18 @@ impl WfpEventSubscription {
 
         let mut subscription_handle = HANDLE::default();
 
-        unsafe {
-            let result = FwpmNetEventSubscribe0(
+        let result = unsafe {
+            FwpmNetEventSubscribe1(
                 engine.handle(),
                 &subscription,
                 Some(event_callback),
                 Some(context as *const c_void),
                 &mut subscription_handle,
-            );
-
-            if result != ERROR_SUCCESS.0 {
-                drop(Box::from_raw(context as *mut mpsc::Sender<NetworkEvent>));
-                return Err(WfpError::Other(format!(
-                    "Failed to subscribe to WFP events: error code {}",
-                    result
-                )));
-            }
+            )
+        };
+        if let Err(err) = WfpError::check("FwpmNetEventSubscribe0", result) {
+            drop(unsafe { Box::from_raw(context as *mut mpsc::Sender<NetworkEvent>) });
+            return Err(err);
         }
 
         Ok(Self {
@@ -207,9 +215,9 @@ unsafe impl Send for WfpEventSubscription {}
 ///
 /// This function receives raw pointers from WFP and must carefully:
 /// - Validate the event pointer is not null
-/// - Parse the FWPM_NET_EVENT1 structure
+/// - Parse the FWPM_NET_EVENT2 structure
 /// - Send the parsed event to the channel without blocking
-unsafe extern "system" fn event_callback(context: *mut c_void, event_ptr: *const FWPM_NET_EVENT1) {
+unsafe extern "system" fn event_callback(context: *mut c_void, event_ptr: *const FWPM_NET_EVENT2) {
     // Validate pointers
     if context.is_null() || event_ptr.is_null() {
         return;
@@ -218,78 +226,132 @@ unsafe extern "system" fn event_callback(context: *mut c_void, event_ptr: *const
     // Recover the sender from the context
     let sender = &*(context as *const mpsc::Sender<NetworkEvent>);
 
-    // Parse the event
-    let event = &*event_ptr;
-    if let Some(network_event) = parse_network_event(event) {
-        // Unbounded channel: never blocks, only fails once the receiver is gone
-        let _ = sender.send(network_event);
-    }
+    // Unbounded channel: never blocks, only fails once the receiver is gone
+    let _ = sender.send(parse_network_event(&*event_ptr));
 }
 
-/// Parse FWPM_NET_EVENT1 into NetworkEvent
+/// Parse FWPM_NET_EVENT2 into NetworkEvent, keeping only fields flagged as set
 ///
 /// # Safety
 ///
-/// The event pointer must be valid and point to a complete FWPM_NET_EVENT1 structure.
-unsafe fn parse_network_event(event: &FWPM_NET_EVENT1) -> Option<NetworkEvent> {
+/// `event` must be a complete FWPM_NET_EVENT2 provided by WFP (valid pointers).
+unsafe fn parse_network_event(event: &FWPM_NET_EVENT2) -> NetworkEvent {
     let header = &event.header;
-    let event_type = NetworkEventType::from(event.r#type.0 as u32);
+    let has = |flag: u32| header.flags & flag != 0;
 
-    // Parse timestamp (FILETIME to SystemTime)
-    let timestamp = filetime_to_systemtime(&header.timeStamp);
-
-    // Parse application path (wide string) - appId.data is *mut u8, need to cast
-    let app_path = if !header.appId.data.is_null() {
-        parse_wide_string(header.appId.data as *const u16).map(PathBuf::from)
+    let app_path = if has(FWPM_NET_EVENT_FLAG_APP_ID_SET) {
+        app_id_to_path(&header.appId)
     } else {
         None
     };
 
-    // Parse IP addresses based on IP version (ipVersion: 0=V4, 1=V6)
-    let (local_addr, remote_addr) = if header.ipVersion.0 == 0 {
-        // IPv4
-        unsafe {
-            let local = parse_ipv4_union(&header.Anonymous1);
-            let remote = parse_ipv4_union_remote(&header.Anonymous2);
-            (local, remote)
+    let ip_version = has(FWPM_NET_EVENT_FLAG_IP_VERSION_SET).then_some(header.ipVersion);
+    // WFP stores IPv4 addresses as host-order integers
+    let local_addr = match (has(FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET), ip_version) {
+        (true, Some(FWP_IP_VERSION_V4)) => {
+            Some(IpAddr::V4(Ipv4Addr::from(header.Anonymous1.localAddrV4)))
         }
-    } else if header.ipVersion.0 == 1 {
-        // IPv6
-        unsafe {
-            let local = parse_ipv6_union(&header.Anonymous1);
-            let remote = parse_ipv6_union_remote(&header.Anonymous2);
-            (local, remote)
+        (true, Some(FWP_IP_VERSION_V6)) => Some(IpAddr::V6(Ipv6Addr::from(
+            header.Anonymous1.localAddrV6.byteArray16,
+        ))),
+        _ => None,
+    };
+    let remote_addr = match (has(FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET), ip_version) {
+        (true, Some(FWP_IP_VERSION_V4)) => {
+            Some(IpAddr::V4(Ipv4Addr::from(header.Anonymous2.remoteAddrV4)))
         }
-    } else {
-        (None, None)
+        (true, Some(FWP_IP_VERSION_V6)) => Some(IpAddr::V6(Ipv6Addr::from(
+            header.Anonymous2.remoteAddrV6.byteArray16,
+        ))),
+        _ => None,
     };
 
-    // Parse filter ID and layer ID for CLASSIFY_DROP events
-    let (filter_id, layer_id) = if event_type == NetworkEventType::ClassifyDrop {
-        unsafe {
-            if !event.Anonymous.classifyDrop.is_null() {
-                let drop_info = &*event.Anonymous.classifyDrop;
-                (Some(drop_info.filterId), Some(drop_info.layerId))
-            } else {
-                (None, None)
-            }
+    let (filter_id, layer_id) = match event.r#type {
+        FWPM_NET_EVENT_TYPE_CLASSIFY_DROP if !event.Anonymous.classifyDrop.is_null() => {
+            let info = &*event.Anonymous.classifyDrop;
+            (Some(info.filterId), Some(info.layerId))
         }
-    } else {
-        (None, None)
+        FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW if !event.Anonymous.classifyAllow.is_null() => {
+            let info = &*event.Anonymous.classifyAllow;
+            (Some(info.filterId), Some(info.layerId))
+        }
+        FWPM_NET_EVENT_TYPE_CAPABILITY_DROP if !event.Anonymous.capabilityDrop.is_null() => {
+            (Some((*event.Anonymous.capabilityDrop).filterId), None)
+        }
+        _ => (None, None),
     };
 
-    Some(NetworkEvent {
-        timestamp,
-        event_type,
+    NetworkEvent {
+        timestamp: filetime_to_systemtime(&header.timeStamp),
+        event_type: NetworkEventType::from(event.r#type.0 as u32),
         app_path,
-        protocol: header.ipProtocol,
+        protocol: has(FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET).then_some(header.ipProtocol),
         local_addr,
         remote_addr,
-        local_port: header.localPort,
-        remote_port: header.remotePort,
+        local_port: has(FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET).then_some(header.localPort),
+        remote_port: has(FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET).then_some(header.remotePort),
         filter_id,
         layer_id,
-    })
+    }
+}
+
+impl WfpEngine {
+    /// Enable or disable collection of [`NetworkEventType::ClassifyAllow`] events
+    ///
+    /// Windows does not collect allow events by default. This is a **system-wide,
+    /// persistent** BFE setting, not limited to this session; enabling it also
+    /// turns on network event collection. Requires administrator privileges.
+    ///
+    /// # Errors
+    ///
+    /// Returns `WfpError::Api` if the engine option cannot be read or written.
+    pub fn set_classify_allow_events(&self, enabled: bool) -> WfpResult<()> {
+        if enabled {
+            set_u32_option(self, FWPM_ENGINE_COLLECT_NET_EVENTS, 1)?;
+        }
+        let keywords = get_u32_option(self, FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS)?;
+        set_u32_option(
+            self,
+            FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS,
+            with_flag(keywords, FWPM_NET_EVENT_KEYWORD_CLASSIFY_ALLOW, enabled),
+        )
+    }
+}
+
+fn with_flag(value: u32, flag: u32, enabled: bool) -> u32 {
+    if enabled {
+        value | flag
+    } else {
+        value & !flag
+    }
+}
+
+fn get_u32_option(engine: &WfpEngine, option: FWPM_ENGINE_OPTION) -> WfpResult<u32> {
+    let mut value: *mut FWP_VALUE0 = ptr::null_mut();
+    let result = unsafe { FwpmEngineGetOption0(engine.handle(), option, &mut value) };
+    WfpError::check("FwpmEngineGetOption0", result)?;
+    if value.is_null() {
+        return Ok(0);
+    }
+
+    let current = unsafe {
+        if (*value).r#type == FWP_UINT32 {
+            (*value).Anonymous.uint32
+        } else {
+            0
+        }
+    };
+    unsafe { FwpmFreeMemory0(&mut value as *mut *mut FWP_VALUE0 as *mut *mut c_void) };
+    Ok(current)
+}
+
+fn set_u32_option(engine: &WfpEngine, option: FWPM_ENGINE_OPTION, value: u32) -> WfpResult<()> {
+    let value = FWP_VALUE0 {
+        r#type: FWP_UINT32,
+        Anonymous: FWP_VALUE0_0 { uint32: value },
+    };
+    let result = unsafe { FwpmEngineSetOption0(engine.handle(), option, &value) };
+    WfpError::check("FwpmEngineSetOption0", result)
 }
 
 /// Convert FILETIME to SystemTime
@@ -313,66 +375,12 @@ fn filetime_to_systemtime(ft: &FILETIME) -> SystemTime {
     }
 }
 
-/// Parse wide string (null-terminated UTF-16)
-unsafe fn parse_wide_string(ptr: *const u16) -> Option<OsString> {
-    if ptr.is_null() {
-        return None;
-    }
-
-    // Find the null terminator
-    let mut len = 0;
-    while *ptr.add(len) != 0 {
-        len += 1;
-    }
-
-    if len == 0 {
-        return None;
-    }
-
-    // Convert to OsString
-    let slice = std::slice::from_raw_parts(ptr, len);
-    Some(OsString::from_wide(slice))
-}
-
-/// Parse IPv4 address from union (reads first 4 bytes as u32) - HEADER1_0 version
-unsafe fn parse_ipv4_union(
-    addr_union: &windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_NET_EVENT_HEADER1_0,
-) -> Option<IpAddr> {
-    // Union contains localAddrV4 as u32
-    let addr_u32 = addr_union.localAddrV4;
-    let bytes = addr_u32.to_ne_bytes();
-    Some(IpAddr::V4(Ipv4Addr::from(bytes)))
-}
-
-/// Parse IPv6 address from union (reads 16-byte array) - HEADER1_0 version
-unsafe fn parse_ipv6_union(
-    addr_union: &windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_NET_EVENT_HEADER1_0,
-) -> Option<IpAddr> {
-    // Union contains localAddrV6 as byte[16]
-    let bytes = addr_union.localAddrV6.byteArray16;
-    Some(IpAddr::V6(Ipv6Addr::from(bytes)))
-}
-
-/// Parse IPv4 address from remote union (HEADER1_1 version)
-unsafe fn parse_ipv4_union_remote(
-    addr_union: &windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_NET_EVENT_HEADER1_1,
-) -> Option<IpAddr> {
-    let addr_u32 = addr_union.remoteAddrV4;
-    let bytes = addr_u32.to_ne_bytes();
-    Some(IpAddr::V4(Ipv4Addr::from(bytes)))
-}
-
-/// Parse IPv6 address from remote union (HEADER1_1 version)
-unsafe fn parse_ipv6_union_remote(
-    addr_union: &windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_NET_EVENT_HEADER1_1,
-) -> Option<IpAddr> {
-    let bytes = addr_union.remoteAddrV6.byteArray16;
-    Some(IpAddr::V6(Ipv6Addr::from(bytes)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
+        FWPM_NET_EVENT_CLASSIFY_ALLOW0, FWPM_NET_EVENT_CLASSIFY_DROP2, FWPM_NET_EVENT_TYPE,
+    };
 
     #[test]
     fn test_event_type_conversion() {
@@ -425,47 +433,138 @@ mod tests {
         assert_eq!(duration.as_secs(), 946684800); // Jan 1, 2000
     }
 
-    #[test]
-    fn test_network_event_struct_creation() {
-        let event = NetworkEvent {
-            timestamp: SystemTime::UNIX_EPOCH,
-            event_type: NetworkEventType::ClassifyDrop,
-            app_path: Some(PathBuf::from(r"C:\test.exe")),
-            protocol: 6,
-            local_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-            remote_addr: Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
-            local_port: 12345,
-            remote_port: 443,
-            filter_id: Some(42),
-            layer_id: Some(1),
+    fn event(event_type: FWPM_NET_EVENT_TYPE, flags: u32) -> FWPM_NET_EVENT2 {
+        let mut event = FWPM_NET_EVENT2 {
+            r#type: event_type,
+            ..Default::default()
         };
+        event.header.flags = flags;
+        event
+    }
 
-        assert_eq!(event.event_type, NetworkEventType::ClassifyDrop);
-        assert_eq!(event.protocol, 6);
-        assert_eq!(event.local_port, 12345);
-        assert_eq!(event.remote_port, 443);
-        assert!(event.app_path.is_some());
+    const ALL_ADDR_FLAGS: u32 = FWPM_NET_EVENT_FLAG_IP_VERSION_SET
+        | FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET
+        | FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET;
+
+    #[test]
+    fn test_parse_ipv4_addresses_are_host_order() {
+        let mut ev = event(FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, ALL_ADDR_FLAGS);
+        ev.header.ipVersion = FWP_IP_VERSION_V4;
+        ev.header.Anonymous1.localAddrV4 = 0x0A00_0001;
+        ev.header.Anonymous2.remoteAddrV4 = 0x0808_0404;
+
+        let parsed = unsafe { parse_network_event(&ev) };
+        assert_eq!(parsed.local_addr, Some("10.0.0.1".parse().unwrap()));
+        assert_eq!(parsed.remote_addr, Some("8.8.4.4".parse().unwrap()));
     }
 
     #[test]
-    fn test_network_event_clone() {
-        let event = NetworkEvent {
-            timestamp: SystemTime::UNIX_EPOCH,
-            event_type: NetworkEventType::ClassifyAllow,
-            app_path: None,
-            protocol: 17,
-            local_addr: None,
-            remote_addr: None,
-            local_port: 0,
-            remote_port: 0,
-            filter_id: None,
-            layer_id: None,
-        };
+    fn test_parse_ipv6_addresses() {
+        let mut ev = event(FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, ALL_ADDR_FLAGS);
+        ev.header.ipVersion = FWP_IP_VERSION_V6;
+        let remote: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        ev.header.Anonymous2.remoteAddrV6.byteArray16 = remote.octets();
 
-        let cloned = event.clone();
-        assert_eq!(cloned.event_type, NetworkEventType::ClassifyAllow);
-        assert_eq!(cloned.protocol, 17);
-        assert!(cloned.app_path.is_none());
+        let parsed = unsafe { parse_network_event(&ev) };
+        assert_eq!(parsed.local_addr, Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)));
+        assert_eq!(parsed.remote_addr, Some(IpAddr::V6(remote)));
+    }
+
+    #[test]
+    fn test_parse_ignores_fields_without_flags() {
+        let mut ev = event(FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, 0);
+        ev.header.ipVersion = FWP_IP_VERSION_V4;
+        ev.header.Anonymous1.localAddrV4 = 0x0A00_0001;
+        ev.header.ipProtocol = 6;
+        ev.header.localPort = 1234;
+        ev.header.remotePort = 443;
+        let mut path: Vec<u8> = "x.exe\0"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        ev.header.appId.size = path.len() as u32;
+        ev.header.appId.data = path.as_mut_ptr();
+
+        let parsed = unsafe { parse_network_event(&ev) };
+        assert_eq!(parsed.local_addr, None);
+        assert_eq!(parsed.remote_addr, None);
+        assert_eq!(parsed.protocol, None);
+        assert_eq!(parsed.local_port, None);
+        assert_eq!(parsed.remote_port, None);
+        assert_eq!(parsed.app_path, None);
+    }
+
+    #[test]
+    fn test_parse_fields_with_flags() {
+        let flags = FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET
+            | FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET
+            | FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET
+            | FWPM_NET_EVENT_FLAG_APP_ID_SET;
+        let mut ev = event(FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, flags);
+        ev.header.ipProtocol = 6;
+        ev.header.localPort = 1234;
+        ev.header.remotePort = 443;
+        let mut path: Vec<u8> = r"\device\x.exe"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        ev.header.appId.size = path.len() as u32;
+        ev.header.appId.data = path.as_mut_ptr();
+
+        let parsed = unsafe { parse_network_event(&ev) };
+        assert_eq!(parsed.event_type, NetworkEventType::ClassifyDrop);
+        assert_eq!(parsed.protocol, Some(6));
+        assert_eq!(parsed.local_port, Some(1234));
+        assert_eq!(parsed.remote_port, Some(443));
+        assert_eq!(parsed.app_path, Some(PathBuf::from(r"\device\x.exe")));
+    }
+
+    #[test]
+    fn test_parse_filter_and_layer_ids() {
+        let mut drop_info = FWPM_NET_EVENT_CLASSIFY_DROP2 {
+            filterId: 42,
+            layerId: 7,
+            ..Default::default()
+        };
+        let mut ev = event(FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, 0);
+        ev.Anonymous.classifyDrop = &mut drop_info;
+        let parsed = unsafe { parse_network_event(&ev) };
+        assert_eq!((parsed.filter_id, parsed.layer_id), (Some(42), Some(7)));
+
+        let mut allow_info = FWPM_NET_EVENT_CLASSIFY_ALLOW0 {
+            filterId: 43,
+            layerId: 8,
+            ..Default::default()
+        };
+        let mut ev = event(FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW, 0);
+        ev.Anonymous.classifyAllow = &mut allow_info;
+        let parsed = unsafe { parse_network_event(&ev) };
+        assert_eq!(parsed.event_type, NetworkEventType::ClassifyAllow);
+        assert_eq!((parsed.filter_id, parsed.layer_id), (Some(43), Some(8)));
+
+        let ev = event(FWPM_NET_EVENT_TYPE_CLASSIFY_DROP, 0);
+        let parsed = unsafe { parse_network_event(&ev) };
+        assert_eq!((parsed.filter_id, parsed.layer_id), (None, None));
+    }
+
+    #[test]
+    fn test_with_flag() {
+        assert_eq!(with_flag(0b0001, 0b0100, true), 0b0101);
+        assert_eq!(with_flag(0b0101, 0b0100, false), 0b0001);
+        assert_eq!(with_flag(0b0101, 0b0100, true), 0b0101);
+    }
+
+    #[test]
+    #[ignore] // Requires admin privileges; changes a system-wide BFE option
+    fn test_set_classify_allow_events_roundtrip() {
+        let engine = WfpEngine::new().expect("Failed to create engine");
+        let before = get_u32_option(&engine, FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS).unwrap();
+
+        engine.set_classify_allow_events(true).unwrap();
+        let enabled = get_u32_option(&engine, FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS).unwrap();
+        assert_ne!(enabled & FWPM_NET_EVENT_KEYWORD_CLASSIFY_ALLOW, 0);
+
+        set_u32_option(&engine, FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS, before).unwrap();
     }
 
     #[test]

@@ -140,6 +140,13 @@ loop {
 # Ok::<(), windows_wfp::WfpError>(())
 ```
 
+Event fields (`app_path`, addresses, ports, protocol) are `None` when WFP did not
+provide them. `app_path` is in NT kernel format (`\device\harddiskvolume3\...`).
+
+Windows does not collect `ClassifyAllow` events by default. Enable them with
+`engine.set_classify_allow_events(true)`; note this is a **system-wide, persistent**
+setting.
+
 ## Examples
 
 Run the included examples (requires Administrator):

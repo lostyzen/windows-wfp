@@ -74,6 +74,7 @@
 //! # Ok::<(), windows_wfp::WfpError>(())
 //! ```
 
+mod app_id;
 pub mod condition;
 pub mod constants;
 pub mod engine;

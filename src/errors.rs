@@ -3,38 +3,22 @@
 //! Error types for Windows Filtering Platform operations.
 
 use thiserror::Error;
-use windows::Win32::Foundation::WIN32_ERROR;
+use windows::core::HRESULT;
 
 /// WFP operation errors
 #[derive(Error, Debug)]
 pub enum WfpError {
-    /// Failed to open WFP engine session
-    #[error("Failed to open WFP engine session")]
-    EngineOpenFailed,
-
-    /// Failed to close WFP engine session
-    #[error("Failed to close WFP engine session")]
-    EngineCloseFailed,
-
-    /// Failed to add filter
-    #[error("Failed to add filter: {0}")]
-    FilterAddFailed(String),
-
-    /// Failed to delete filter
-    #[error("Failed to delete filter: {0}")]
-    FilterDeleteFailed(String),
-
-    /// Failed to begin transaction
-    #[error("Failed to begin WFP transaction")]
-    TransactionBeginFailed,
-
-    /// Failed to commit transaction
-    #[error("Failed to commit WFP transaction")]
-    TransactionCommitFailed,
-
-    /// Failed to abort transaction
-    #[error("Failed to abort WFP transaction")]
-    TransactionAbortFailed,
+    /// A WFP API call failed
+    ///
+    /// `code` is the raw value returned by the API: a Win32 error code or an
+    /// `FWP_E_*` HRESULT (`0x8032xxxx`).
+    #[error("{op} failed with 0x{code:08X}: {}", system_message(.code))]
+    Api {
+        /// Name of the failing WFP function (e.g. `FwpmFilterAdd0`)
+        op: &'static str,
+        /// Raw error code
+        code: u32,
+    },
 
     /// Application path not found or could not be converted to NT kernel format
     ///
@@ -54,34 +38,59 @@ pub enum WfpError {
     #[error("Invalid filter rule: {0}")]
     InvalidRule(String),
 
+    /// Invalid IP address or CIDR prefix
+    #[error("Invalid address: {0}")]
+    InvalidAddress(String),
+
     /// Insufficient permissions (must run as administrator)
     #[error("Insufficient permissions - administrator privileges required")]
     InsufficientPermissions,
 
-    /// WFP service not available
+    /// WFP service (BFE) not available
     #[error("Windows Filtering Platform service not available")]
     ServiceNotAvailable,
-
-    /// Win32 API error with code and message
-    #[error("Win32 error {code}: {message}")]
-    Win32Error { code: u32, message: String },
-
-    /// Generic error with description
-    #[error("{0}")]
-    Other(String),
 }
 
-impl From<WIN32_ERROR> for WfpError {
-    fn from(error: WIN32_ERROR) -> Self {
-        let code = error.0;
-        let message = match code {
-            5 => "Access denied".to_string(),
-            1062 => "Service not started".to_string(),
-            1075 => "Service dependency does not exist".to_string(),
-            _ => format!("Unknown Win32 error: {}", code),
-        };
+const ERROR_ACCESS_DENIED: u32 = 5;
+const E_ACCESSDENIED: u32 = 0x8007_0005;
+const ERROR_SERVICE_NOT_ACTIVE: u32 = 1062;
+const ERROR_SERVICE_DEPENDENCY_DELETED: u32 = 1075;
 
-        WfpError::Win32Error { code, message }
+impl WfpError {
+    /// Convert the return value of a WFP API call into a result
+    pub(crate) fn check(op: &'static str, code: u32) -> WfpResult<()> {
+        match code {
+            0 => Ok(()),
+            ERROR_ACCESS_DENIED | E_ACCESSDENIED => Err(WfpError::InsufficientPermissions),
+            ERROR_SERVICE_NOT_ACTIVE | ERROR_SERVICE_DEPENDENCY_DELETED => {
+                Err(WfpError::ServiceNotAvailable)
+            }
+            _ => Err(WfpError::Api { op, code }),
+        }
+    }
+
+    /// Raw error code returned by WFP, if this error comes from an API call
+    pub fn code(&self) -> Option<u32> {
+        match self {
+            WfpError::Api { code, .. } => Some(*code),
+            _ => None,
+        }
+    }
+}
+
+/// Localized system description of a Win32 error code or HRESULT
+fn system_message(code: &u32) -> String {
+    let hresult = if code & 0x8000_0000 != 0 {
+        HRESULT(*code as i32)
+    } else {
+        HRESULT::from_win32(*code)
+    };
+    let message = hresult.message();
+    let message = message.trim();
+    if message.is_empty() {
+        "unknown error".to_string()
+    } else {
+        message.to_string()
     }
 }
 
@@ -94,10 +103,6 @@ mod tests {
     #[test]
     fn test_error_display_messages() {
         assert_eq!(
-            WfpError::EngineOpenFailed.to_string(),
-            "Failed to open WFP engine session"
-        );
-        assert_eq!(
             WfpError::InsufficientPermissions.to_string(),
             "Insufficient permissions - administrator privileges required"
         );
@@ -106,89 +111,65 @@ mod tests {
             "Windows Filtering Platform service not available"
         );
         assert_eq!(
-            WfpError::TransactionBeginFailed.to_string(),
-            "Failed to begin WFP transaction"
-        );
-        assert_eq!(
-            WfpError::TransactionCommitFailed.to_string(),
-            "Failed to commit WFP transaction"
-        );
-        assert_eq!(
-            WfpError::TransactionAbortFailed.to_string(),
-            "Failed to abort WFP transaction"
-        );
-        assert_eq!(
             WfpError::AppPathNotFound(r"C:\missing.exe".into()).to_string(),
             r"Application path not found or invalid: C:\missing.exe"
         );
     }
 
     #[test]
-    fn test_error_display_with_details() {
-        let err = WfpError::FilterAddFailed("test error".into());
-        assert_eq!(err.to_string(), "Failed to add filter: test error");
-
-        let err = WfpError::FilterDeleteFailed("filter 42".into());
-        assert_eq!(err.to_string(), "Failed to delete filter: filter 42");
-
-        let err = WfpError::Other("something happened".into());
-        assert_eq!(err.to_string(), "something happened");
+    fn test_check_success() {
+        assert!(WfpError::check("FwpmFilterAdd0", 0).is_ok());
     }
 
     #[test]
-    fn test_win32_error_display() {
-        let err = WfpError::Win32Error {
-            code: 5,
-            message: "Access denied".into(),
+    fn test_check_maps_well_known_codes() {
+        for code in [5, 0x8007_0005] {
+            assert!(matches!(
+                WfpError::check("op", code),
+                Err(WfpError::InsufficientPermissions)
+            ));
+        }
+        for code in [1062, 1075] {
+            assert!(matches!(
+                WfpError::check("op", code),
+                Err(WfpError::ServiceNotAvailable)
+            ));
+        }
+    }
+
+    #[test]
+    fn test_check_keeps_operation_and_code() {
+        let err = WfpError::check("FwpmFilterAdd0", 0x8032_0009).unwrap_err();
+        assert!(matches!(
+            err,
+            WfpError::Api {
+                op: "FwpmFilterAdd0",
+                code: 0x8032_0009
+            }
+        ));
+        assert_eq!(err.code(), Some(0x8032_0009));
+        assert_eq!(WfpError::InsufficientPermissions.code(), None);
+    }
+
+    #[test]
+    fn test_api_error_display_is_hex_with_message() {
+        let err = WfpError::Api {
+            op: "FwpmFilterAdd0",
+            code: 0x8032_0009,
         };
-        assert_eq!(err.to_string(), "Win32 error 5: Access denied");
+        let text = err.to_string();
+        assert!(
+            text.starts_with("FwpmFilterAdd0 failed with 0x80320009: "),
+            "{text}"
+        );
+        assert!(!text.ends_with("unknown error"), "{text}");
     }
 
     #[test]
-    fn test_win32_error_conversion_access_denied() {
-        let err: WfpError = WIN32_ERROR(5).into();
-        match err {
-            WfpError::Win32Error { code, message } => {
-                assert_eq!(code, 5);
-                assert_eq!(message, "Access denied");
-            }
-            _ => panic!("Expected Win32Error"),
-        }
-    }
-
-    #[test]
-    fn test_win32_error_conversion_service_not_started() {
-        let err: WfpError = WIN32_ERROR(1062).into();
-        match err {
-            WfpError::Win32Error { code, message } => {
-                assert_eq!(code, 1062);
-                assert_eq!(message, "Service not started");
-            }
-            _ => panic!("Expected Win32Error"),
-        }
-    }
-
-    #[test]
-    fn test_win32_error_conversion_dependency_missing() {
-        let err: WfpError = WIN32_ERROR(1075).into();
-        match err {
-            WfpError::Win32Error { code, message } => {
-                assert_eq!(code, 1075);
-                assert_eq!(message, "Service dependency does not exist");
-            }
-            _ => panic!("Expected Win32Error"),
-        }
-    }
-
-    #[test]
-    fn test_win32_error_conversion_unknown() {
-        let err: WfpError = WIN32_ERROR(9999).into();
-        match err {
-            WfpError::Win32Error { code, message } => {
-                assert_eq!(code, 9999);
-                assert!(message.contains("Unknown"));
-            }
-            _ => panic!("Expected Win32Error"),
-        }
+    fn test_api_error_display_win32_code() {
+        let err = WfpError::Api { op: "op", code: 2 };
+        let text = err.to_string();
+        assert!(text.starts_with("op failed with 0x00000002: "), "{text}");
+        assert!(!text.ends_with("unknown error"), "{text}");
     }
 }

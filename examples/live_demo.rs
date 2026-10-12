@@ -125,14 +125,16 @@ fn print_event(event: &NetworkEvent, count: usize) {
     }
 
     if let Some(local) = event.local_addr {
-        println!("   Local:       {}:{}", local, event.local_port);
+        println!("   Local:       {}:{}", local, port(event.local_port));
     }
 
     if let Some(remote) = event.remote_addr {
-        println!("   Remote:      {}:{}", remote, event.remote_port);
+        println!("   Remote:      {}:{}", remote, port(event.remote_port));
     }
 
-    println!("   Protocol:    {}", event.protocol);
+    if let Some(protocol) = event.protocol {
+        println!("   Protocol:    {}", protocol);
+    }
 
     if let Some(filter_id) = event.filter_id {
         println!("   Filter ID:   {}", filter_id);
@@ -143,6 +145,10 @@ fn print_event(event: &NetworkEvent, count: usize) {
     }
 
     println!();
+}
+
+fn port(port: Option<u16>) -> String {
+    port.map_or_else(|| "?".to_string(), |p| p.to_string())
 }
 
 fn find_curl_path() -> PathBuf {

@@ -17,12 +17,13 @@
 //! # Ok::<(), windows_wfp::WfpError>(())
 //! ```
 
+use crate::app_id::app_id_to_path;
 use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
 use std::path::PathBuf;
 use std::ptr;
 use windows::core::GUID;
-use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmFilterCreateEnumHandle0, FwpmFilterDestroyEnumHandle0, FwpmFilterEnum0, FwpmFreeMemory0,
     FWPM_FILTER0, FWP_ACTION_BLOCK, FWP_ACTION_CALLOUT_INSPECTION, FWP_ACTION_CALLOUT_TERMINATING,
@@ -141,15 +142,9 @@ impl FilterEnumerator {
     {
         let mut enum_handle = HANDLE::default();
 
-        unsafe {
-            let result = FwpmFilterCreateEnumHandle0(engine.handle(), None, &mut enum_handle);
-            if result != ERROR_SUCCESS.0 {
-                return Err(WfpError::Other(format!(
-                    "Failed to create filter enum handle: error code {}",
-                    result
-                )));
-            }
-        }
+        let result =
+            unsafe { FwpmFilterCreateEnumHandle0(engine.handle(), None, &mut enum_handle) };
+        WfpError::check("FwpmFilterCreateEnumHandle0", result)?;
 
         let mut accumulator = T::default();
         let batch_size = 100;
@@ -168,14 +163,11 @@ impl FilterEnumerator {
                 )
             };
 
-            if result != ERROR_SUCCESS.0 {
+            if let Err(err) = WfpError::check("FwpmFilterEnum0", result) {
                 unsafe {
                     let _ = FwpmFilterDestroyEnumHandle0(engine.handle(), enum_handle);
                 }
-                return Err(WfpError::Other(format!(
-                    "Failed to enumerate filters: error code {}",
-                    result
-                )));
+                return Err(err);
             }
 
             if num_returned == 0 {
@@ -302,20 +294,7 @@ unsafe fn extract_app_path(filter: &FWPM_FILTER0) -> Option<PathBuf> {
         return None;
     }
 
-    let blob = &*blob_ptr;
-    if blob.data.is_null() || blob.size == 0 || (blob.size % 2) != 0 {
-        return None;
-    }
-
-    let wide_slice = std::slice::from_raw_parts(blob.data as *const u16, (blob.size / 2) as usize);
-    let null_pos = wide_slice
-        .iter()
-        .position(|&c| c == 0)
-        .unwrap_or(wide_slice.len());
-
-    String::from_utf16(&wide_slice[..null_pos])
-        .ok()
-        .map(PathBuf::from)
+    app_id_to_path(&*blob_ptr)
 }
 
 #[cfg(test)]

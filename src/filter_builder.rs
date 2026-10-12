@@ -27,26 +27,23 @@
 //!
 //! This ensures filters work correctly without requiring users to know about NT kernel paths.
 
+use crate::app_id::AppId;
 use crate::condition::{IpAddrMask, Protocol};
 use crate::constants::*;
 use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
 use crate::filter::{Action, FilterRule};
 use crate::layer;
-use std::ffi::c_void;
 use std::net::IpAddr;
-use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
 use std::ptr;
-use windows::core::{GUID, PCWSTR, PWSTR};
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::core::{GUID, PWSTR};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FwpmFilterAdd0, FwpmFilterDeleteById0, FwpmFreeMemory0, FwpmGetAppIdFromFileName0,
-    FWPM_ACTION0, FWPM_DISPLAY_DATA0, FWPM_FILTER0, FWPM_FILTER_CONDITION0, FWPM_FILTER_FLAGS,
-    FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_ACTION_TYPE, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE,
-    FWP_CONDITION_VALUE0, FWP_CONDITION_VALUE0_0, FWP_DATA_TYPE, FWP_MATCH_EQUAL, FWP_UINT16,
-    FWP_UINT64, FWP_UINT8, FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK,
-    FWP_V6_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0,
+    FwpmFilterAdd0, FwpmFilterDeleteById0, FWPM_ACTION0, FWPM_DISPLAY_DATA0, FWPM_FILTER0,
+    FWPM_FILTER_CONDITION0, FWPM_FILTER_FLAGS, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT,
+    FWP_ACTION_TYPE, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0,
+    FWP_CONDITION_VALUE0_0, FWP_DATA_TYPE, FWP_MATCH_EQUAL, FWP_UINT16, FWP_UINT64, FWP_UINT8,
+    FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK, FWP_VALUE0,
+    FWP_VALUE0_0,
 };
 
 /// Handle to the WFP filters created from one [`FilterRule`]
@@ -81,32 +78,6 @@ impl IpFamily {
     }
 }
 
-/// Owned blob returned by `FwpmGetAppIdFromFileName0`, freed on drop
-struct AppId(*mut FWP_BYTE_BLOB);
-
-impl AppId {
-    fn from_path(path: &Path) -> WfpResult<Self> {
-        let path_wide: Vec<u16> = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let mut blob: *mut FWP_BYTE_BLOB = ptr::null_mut();
-        let result = unsafe { FwpmGetAppIdFromFileName0(PCWSTR(path_wide.as_ptr()), &mut blob) };
-
-        if result != ERROR_SUCCESS.0 || blob.is_null() {
-            return Err(WfpError::AppPathNotFound(path.display().to_string()));
-        }
-        Ok(Self(blob))
-    }
-}
-
-impl Drop for AppId {
-    fn drop(&mut self) {
-        unsafe { FwpmFreeMemory0(&mut self.0 as *mut *mut FWP_BYTE_BLOB as *mut *mut c_void) };
-    }
-}
-
 /// Reject conditions that cannot be translated, instead of silently dropping them
 fn check_supported_conditions(rule: &FilterRule) -> WfpResult<()> {
     if rule.service_name.is_some() {
@@ -114,6 +85,9 @@ fn check_supported_conditions(rule: &FilterRule) -> WfpResult<()> {
     }
     if rule.app_container_sid.is_some() {
         return Err(WfpError::UnsupportedCondition("app_container_sid".into()));
+    }
+    for ip in [&rule.remote_ip, &rule.local_ip].into_iter().flatten() {
+        ip.validate()?;
     }
     Ok(())
 }
@@ -249,7 +223,7 @@ impl FilterBuilder {
     /// - `WfpError::UnsupportedCondition` if the rule uses a condition not yet translated
     /// - `WfpError::InvalidRule` if the rule mixes IPv4 and IPv6 conditions
     /// - `WfpError::AppPathNotFound` if the application path cannot be resolved
-    /// - `WfpError::FilterAddFailed` if WFP rejects the filter
+    /// - `WfpError::Api` if WFP rejects the filter
     ///
     /// # Examples
     ///
@@ -404,13 +378,7 @@ impl FilterBuilder {
         let mut filter_id: u64 = 0;
         let result =
             unsafe { FwpmFilterAdd0(engine.handle(), &filter, None, Some(&mut filter_id)) };
-
-        if result != ERROR_SUCCESS.0 {
-            return Err(WfpError::FilterAddFailed(format!(
-                "Failed to add filter '{}' ({:?} layer): error code {}",
-                rule.name, family, result
-            )));
-        }
+        WfpError::check("FwpmFilterAdd0", result)?;
 
         Ok(filter_id)
     }
@@ -422,7 +390,7 @@ impl FilterBuilder {
     ///
     /// # Errors
     ///
-    /// Returns `WfpError::FilterDeleteFailed` if a filter cannot be deleted.
+    /// Returns `WfpError::Api` if a filter cannot be deleted.
     ///
     /// # Examples
     ///
@@ -454,20 +422,10 @@ impl FilterBuilder {
     ///
     /// # Errors
     ///
-    /// Returns `WfpError::FilterDeleteFailed` if the filter cannot be deleted.
+    /// Returns `WfpError::Api` if the filter cannot be deleted.
     pub fn delete_filter_by_id(engine: &WfpEngine, filter_id: u64) -> WfpResult<()> {
-        unsafe {
-            let result = FwpmFilterDeleteById0(engine.handle(), filter_id);
-
-            if result != ERROR_SUCCESS.0 {
-                return Err(WfpError::FilterDeleteFailed(format!(
-                    "Failed to delete filter ID {}: error code {}",
-                    filter_id, result
-                )));
-            }
-        }
-
-        Ok(())
+        let result = unsafe { FwpmFilterDeleteById0(engine.handle(), filter_id) };
+        WfpError::check("FwpmFilterDeleteById0", result)
     }
 }
 
@@ -548,6 +506,14 @@ mod tests {
         assert!(
             matches!(result, Err(WfpError::UnsupportedCondition(c)) if c == "app_container_sid")
         );
+    }
+
+    #[test]
+    fn test_invalid_prefix_set_directly_is_rejected() {
+        let mut ip = cidr("10.0.0.0/8");
+        ip.prefix_len = 64;
+        let result = check_supported_conditions(&rule().with_remote_ip(ip));
+        assert!(matches!(result, Err(WfpError::InvalidAddress(_))));
     }
 
     #[test]
