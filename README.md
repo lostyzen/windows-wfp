@@ -88,8 +88,12 @@ let rule = FilterRule::new("HTTPS only", Direction::Outbound, Action::Permit)
     .with_weight(FilterWeight::UserPermit)
     .with_app_path(r"C:\myapp\app.exe")
     .with_protocol(Protocol::Tcp)
-    .with_remote_port(443)
-    .with_remote_ip(IpAddrMask::from_cidr("0.0.0.0/0").unwrap());
+    .with_remote_port(443);
+// No IP condition: installed on both the IPv4 and IPv6 layers.
+
+// An IP condition pins the rule to that address family:
+let ipv4_only = rule.clone().with_remote_ip(IpAddrMask::from_cidr("0.0.0.0/0")?); // all IPv4, no IPv6
+let lan_only = rule.with_remote_ip(IpAddrMask::from_cidr("192.168.0.0/16")?);      // IPv4 LAN only
 # Ok::<(), windows_wfp::WfpError>(())
 ```
 
