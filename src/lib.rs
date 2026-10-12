@@ -30,12 +30,12 @@
 //!     .with_weight(FilterWeight::UserBlock)
 //!     .with_app_path(r"C:\Windows\System32\curl.exe");
 //!
-//! let filter_id = FilterBuilder::add_filter(&engine, &rule)?;
+//! let filter = FilterBuilder::add_filter(&engine, &rule)?;
 //!
-//! // curl.exe is now blocked at kernel level!
+//! // curl.exe is now blocked at kernel level, over IPv4 and IPv6!
 //!
 //! // Clean up
-//! FilterBuilder::delete_filter(&engine, filter_id)?;
+//! FilterBuilder::delete_filter(&engine, &filter)?;
 //! # Ok::<(), windows_wfp::WfpError>(())
 //! ```
 //!
@@ -55,10 +55,9 @@
 //! Subscribe to network events for learning mode:
 //!
 //! ```no_run
-//! use windows_wfp::{WfpEngine, WfpEventSubscription};
+//! use windows_wfp::WfpEventSubscription;
 //!
-//! let engine = WfpEngine::new()?;
-//! let subscription = WfpEventSubscription::new(&engine)?;
+//! let subscription = WfpEventSubscription::new()?;
 //!
 //! loop {
 //!     match subscription.try_recv() {
@@ -90,11 +89,11 @@ pub mod transaction;
 // Re-exports
 pub use condition::{IpAddrMask, Protocol};
 pub use constants::*;
-pub use engine::WfpEngine;
+pub use engine::{WfpConfig, WfpEngine};
 pub use errors::{WfpError, WfpResult};
 pub use events::{NetworkEvent, NetworkEventType, WfpEventSubscription};
 pub use filter::{Action, Direction, FilterRule};
-pub use filter_builder::FilterBuilder;
+pub use filter_builder::{FilterBuilder, FilterHandle};
 pub use filter_enum::{FilterAction, FilterEnumerator, FilterInfo};
 pub use layer::FilterWeight;
 pub use provider::{initialize_wfp, WfpProvider, WfpSublayer};

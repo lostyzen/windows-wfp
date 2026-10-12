@@ -43,6 +43,17 @@ pub enum WfpError {
     #[error("Application path not found or invalid: {0}")]
     AppPathNotFound(String),
 
+    /// The rule uses a condition this crate cannot translate yet
+    ///
+    /// The rule is rejected rather than installed without the condition,
+    /// which would make the filter match all traffic.
+    #[error("Unsupported filter condition '{0}': rule rejected to avoid matching all traffic")]
+    UnsupportedCondition(String),
+
+    /// The rule is internally inconsistent (e.g. IPv4 and IPv6 conditions mixed)
+    #[error("Invalid filter rule: {0}")]
+    InvalidRule(String),
+
     /// Insufficient permissions (must run as administrator)
     #[error("Insufficient permissions - administrator privileges required")]
     InsufficientPermissions,

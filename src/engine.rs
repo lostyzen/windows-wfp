@@ -2,13 +2,57 @@
 //!
 //! Provides safe Rust wrapper around WFP engine session.
 
+use crate::constants::{WFP_PROVIDER_GUID, WFP_SUBLAYER_GUID};
 use crate::errors::{WfpError, WfpResult};
 use std::ptr;
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::{GUID, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmEngineClose0, FwpmEngineOpen0, FWPM_SESSION0, FWPM_SESSION_FLAG_DYNAMIC,
 };
+
+/// Identity and priority of the WFP provider and sublayer owning the filters
+///
+/// Applications should use their own unique GUIDs so that their filters do not
+/// collide with other users of this crate.
+///
+/// # Examples
+///
+/// ```no_run
+/// use windows_wfp::{WfpConfig, WfpEngine};
+/// use windows::core::GUID;
+///
+/// let config = WfpConfig {
+///     provider_key: GUID::from_u128(0x0b9a3c1e_5d2f_4e6a_9b7c_1d2e3f4a5b6c),
+///     sublayer_key: GUID::from_u128(0x7c6b5a4f_3e2d_4c1b_8a9f_0e1d2c3b4a59),
+///     display_name: "my-firewall".into(),
+///     ..WfpConfig::default()
+/// };
+/// let engine = WfpEngine::new()?.with_config(config);
+/// # Ok::<(), windows_wfp::WfpError>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WfpConfig {
+    /// Provider GUID attached to the provider, sublayer and every filter
+    pub provider_key: GUID,
+    /// Sublayer GUID in which filters are added
+    pub sublayer_key: GUID,
+    /// Sublayer weight (higher = evaluated before other sublayers)
+    pub sublayer_weight: u16,
+    /// Name displayed for the provider and sublayer
+    pub display_name: String,
+}
+
+impl Default for WfpConfig {
+    fn default() -> Self {
+        Self {
+            provider_key: WFP_PROVIDER_GUID,
+            sublayer_key: WFP_SUBLAYER_GUID,
+            sublayer_weight: 0xFFFF,
+            display_name: "windows-wfp".to_string(),
+        }
+    }
+}
 
 /// WFP Engine session with RAII handle management
 ///
@@ -29,6 +73,7 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
 pub struct WfpEngine {
     /// Handle to WFP engine session
     handle: HANDLE,
+    config: WfpConfig,
 }
 
 impl WfpEngine {
@@ -100,12 +145,24 @@ impl WfpEngine {
             }
         }
 
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            config: WfpConfig::default(),
+        })
+    }
+
+    /// Use a custom provider/sublayer configuration for this session
+    pub fn with_config(mut self, config: WfpConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Provider/sublayer configuration used by this session
+    pub fn config(&self) -> &WfpConfig {
+        &self.config
     }
 
     /// Get raw handle to WFP engine session
-    ///
-    /// # Safety
     ///
     /// The handle is only valid while this `WfpEngine` instance is alive.
     /// Do not close the handle manually - it will be closed automatically on drop.
@@ -161,6 +218,15 @@ mod tests {
         }
         // Engine dropped - session should be closed automatically
         // No way to verify programmatically without leaking handles
+    }
+
+    #[test]
+    fn test_default_config_uses_crate_guids() {
+        let config = WfpConfig::default();
+        assert_eq!(config.provider_key, WFP_PROVIDER_GUID);
+        assert_eq!(config.sublayer_key, WFP_SUBLAYER_GUID);
+        assert_eq!(config.sublayer_weight, 0xFFFF);
+        assert_ne!(config.provider_key, config.sublayer_key);
     }
 
     #[test]

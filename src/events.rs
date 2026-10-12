@@ -14,8 +14,7 @@ use std::time::{Duration, SystemTime};
 use windows::core::GUID;
 use windows::Win32::Foundation::{ERROR_SUCCESS, FILETIME, HANDLE};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FwpmNetEventSubscribe0, FwpmNetEventUnsubscribe0, FWPM_NET_EVENT1, FWPM_NET_EVENT_CALLBACK0,
-    FWPM_NET_EVENT_SUBSCRIPTION0,
+    FwpmNetEventSubscribe0, FwpmNetEventUnsubscribe0, FWPM_NET_EVENT1, FWPM_NET_EVENT_SUBSCRIPTION0,
 };
 
 /// Network event from WFP
@@ -97,35 +96,33 @@ impl std::fmt::Display for NetworkEventType {
 /// WFP Event Subscription Handle
 ///
 /// RAII wrapper for WFP event subscription. Automatically unsubscribes on drop.
-/// Events are delivered via an mpsc channel for thread-safe processing.
+/// Events are delivered via an unbounded mpsc channel.
+///
+/// The subscription owns a dedicated WFP session, so it is independent of any
+/// other [`WfpEngine`] and can be moved freely between threads.
 pub struct WfpEventSubscription {
-    engine: *const WfpEngine,
     subscription_handle: HANDLE,
-    _callback: Box<FWPM_NET_EVENT_CALLBACK0>, // Keep callback alive
     receiver: mpsc::Receiver<NetworkEvent>,
-    /// Raw pointer to the boxed `Sender<NetworkEvent>` used as the WFP callback context.
-    /// Must be freed after `FwpmNetEventUnsubscribe0` to avoid a memory leak.
+    /// Boxed `Sender<NetworkEvent>` passed as the WFP callback context; freed after unsubscribing.
     sender_context: *mut c_void,
+    engine: WfpEngine,
 }
 
 impl WfpEventSubscription {
     /// Subscribe to WFP network events
     ///
-    /// Creates a new event subscription that monitors network events.
-    /// Events are delivered via the returned receiver channel.
+    /// Opens a dedicated WFP session and subscribes to network events on it.
+    /// Requires administrator privileges.
     ///
     /// # Errors
     ///
-    /// Returns error if subscription fails (permissions, invalid engine, etc.)
-    pub fn new(engine: &WfpEngine) -> WfpResult<Self> {
+    /// Returns error if the session cannot be opened or the subscription fails.
+    pub fn new() -> WfpResult<Self> {
+        let engine = WfpEngine::new()?;
         let (sender, receiver) = mpsc::channel();
 
         // Box the channel sender so it has a stable address for the context pointer
-        let sender_box = Box::new(sender);
-        let context = Box::into_raw(sender_box) as *mut c_void;
-
-        // Create the callback function
-        let callback: FWPM_NET_EVENT_CALLBACK0 = Some(event_callback);
+        let context = Box::into_raw(Box::new(sender)) as *mut c_void;
 
         // Create subscription for all events
         let subscription = FWPM_NET_EVENT_SUBSCRIPTION0 {
@@ -140,13 +137,12 @@ impl WfpEventSubscription {
             let result = FwpmNetEventSubscribe0(
                 engine.handle(),
                 &subscription,
-                callback,
+                Some(event_callback),
                 Some(context as *const c_void),
                 &mut subscription_handle,
             );
 
             if result != ERROR_SUCCESS.0 {
-                // Clean up the boxed sender on error
                 drop(Box::from_raw(context as *mut mpsc::Sender<NetworkEvent>));
                 return Err(WfpError::Other(format!(
                     "Failed to subscribe to WFP events: error code {}",
@@ -156,11 +152,10 @@ impl WfpEventSubscription {
         }
 
         Ok(Self {
-            engine: engine as *const WfpEngine,
             subscription_handle,
-            _callback: Box::new(callback), // Keep callback alive to prevent GC
             receiver,
             sender_context: context,
+            engine,
         })
     }
 
@@ -174,7 +169,7 @@ impl WfpEventSubscription {
         self.receiver.recv()
     }
 
-    /// Get an iterator over pending events
+    /// Blocking iterator over incoming events
     pub fn iter(&self) -> mpsc::Iter<'_, NetworkEvent> {
         self.receiver.iter()
     }
@@ -182,14 +177,13 @@ impl WfpEventSubscription {
 
 impl Drop for WfpEventSubscription {
     fn drop(&mut self) {
-        if !self.subscription_handle.is_invalid() && !self.engine.is_null() {
+        // Runs before `self.engine` is dropped, so the session is still open here.
+        if !self.subscription_handle.is_invalid() {
             unsafe {
                 // Unsubscribe first so no more callbacks can fire before we free the context
-                let _ = FwpmNetEventUnsubscribe0((*self.engine).handle(), self.subscription_handle);
+                let _ = FwpmNetEventUnsubscribe0(self.engine.handle(), self.subscription_handle);
             }
         }
-        // Free the boxed Sender that was passed as the WFP callback context.
-        // Safe to do now because WfpmNetEventUnsubscribe0 guarantees no further callbacks.
         if !self.sender_context.is_null() {
             unsafe {
                 drop(Box::from_raw(
@@ -200,11 +194,9 @@ impl Drop for WfpEventSubscription {
     }
 }
 
-// SAFETY: WfpEventSubscription is Send because the WFP subscription handle and callback
-// context can be safely transferred between threads. The raw `engine` pointer is only
-// dereferenced in `Drop::drop` to call `FwpmNetEventUnsubscribe0`; callers must ensure the
-// borrowed `WfpEngine` outlives this subscription (e.g. by declaring it after the engine in
-// a containing struct, so it drops first).
+// SAFETY: the subscription owns its WFP session (`WfpEngine` is Send), the subscription
+// handle is an opaque kernel handle, and `sender_context` points to a `Sender` (Send) that is
+// only freed in `Drop`, after `FwpmNetEventUnsubscribe0` guarantees no callback is running.
 unsafe impl Send for WfpEventSubscription {}
 
 // WfpEventSubscription is NOT Sync: the mpsc::Receiver requires exclusive access.
@@ -229,7 +221,7 @@ unsafe extern "system" fn event_callback(context: *mut c_void, event_ptr: *const
     // Parse the event
     let event = &*event_ptr;
     if let Some(network_event) = parse_network_event(event) {
-        // Send to channel (non-blocking - drops event if channel is full)
+        // Unbounded channel: never blocks, only fails once the receiver is gone
         let _ = sender.send(network_event);
     }
 }

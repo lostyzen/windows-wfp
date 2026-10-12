@@ -2,7 +2,6 @@
 //!
 //! Handles registration of WFP provider and sublayer.
 
-use crate::constants::{WFP_PROVIDER_GUID, WFP_SUBLAYER_GUID};
 use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
 use crate::transaction::WfpTransaction;
@@ -20,10 +19,10 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
 pub struct WfpProvider;
 
 impl WfpProvider {
-    /// Register windows-wfp as a WFP provider
+    /// Register the provider described by the engine's [`WfpConfig`](crate::WfpConfig)
     ///
-    /// This must be called before adding any filters. The provider registration
-    /// is persistent and survives reboots.
+    /// This must be called before adding any filters. With the default dynamic
+    /// session, the provider is removed when the engine session is closed.
     ///
     /// # Errors
     ///
@@ -39,18 +38,13 @@ impl WfpProvider {
     /// # Ok::<(), windows_wfp::WfpError>(())
     /// ```
     pub fn register(engine: &WfpEngine) -> WfpResult<()> {
+        let config = engine.config();
         // Keep wide strings alive for the duration of the function
-        let name_wide: Vec<u16> = "windows-wfp"
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-        let desc_wide: Vec<u16> = "windows-wfp Firewall Provider"
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let name_wide = to_wide(&config.display_name);
+        let desc_wide = to_wide(&format!("{} firewall provider", config.display_name));
 
         let provider = FWPM_PROVIDER0 {
-            providerKey: WFP_PROVIDER_GUID,
+            providerKey: config.provider_key,
             displayData:
                 windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_DISPLAY_DATA0 {
                     name: PWSTR(name_wide.as_ptr() as *mut u16),
@@ -85,14 +79,14 @@ impl WfpProvider {
 
 /// WFP Sublayer for windows-wfp filters
 ///
-/// All windows-wfp filters are added to this sublayer, allowing them to be
-/// managed as a group and ensuring proper priority.
+/// All filters are added to the sublayer described by the engine's
+/// [`WfpConfig`](crate::WfpConfig), allowing them to be managed as a group.
 pub struct WfpSublayer;
 
 impl WfpSublayer {
-    /// Register windows-wfp sublayer
+    /// Register the sublayer described by the engine's [`WfpConfig`](crate::WfpConfig)
     ///
-    /// The sublayer groups all windows-wfp filters together and assigns them
+    /// The sublayer groups all filters together and assigns them
     /// a specific weight for priority ordering.
     ///
     /// # Errors
@@ -110,31 +104,26 @@ impl WfpSublayer {
     /// # Ok::<(), windows_wfp::WfpError>(())
     /// ```
     pub fn register(engine: &WfpEngine) -> WfpResult<()> {
+        let config = engine.config();
         // Keep wide strings alive for the duration of the function
-        let name_wide: Vec<u16> = "windows-wfp Filters"
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-        let desc_wide: Vec<u16> = "Sublayer for windows-wfp firewall exception filters"
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let name_wide = to_wide(&format!("{} filters", config.display_name));
+        let desc_wide = to_wide(&format!("Sublayer for {} filters", config.display_name));
 
         let sublayer = FWPM_SUBLAYER0 {
-            subLayerKey: WFP_SUBLAYER_GUID,
+            subLayerKey: config.sublayer_key,
             displayData:
                 windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_DISPLAY_DATA0 {
                     name: PWSTR(name_wide.as_ptr() as *mut u16),
                     description: PWSTR(desc_wide.as_ptr() as *mut u16),
                 },
             flags: 0,
-            providerKey: &WFP_PROVIDER_GUID as *const _ as *mut _,
+            providerKey: &config.provider_key as *const _ as *mut _,
             providerData:
                 windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_BYTE_BLOB {
                     size: 0,
                     data: ptr::null_mut(),
                 },
-            weight: 0xFFFF, // Maximum weight - highest priority for windows-wfp filters
+            weight: config.sublayer_weight,
         };
 
         unsafe {
@@ -183,6 +172,10 @@ pub fn initialize_wfp(engine: &WfpEngine) -> WfpResult<()> {
     txn.commit()?;
 
     Ok(())
+}
+
+fn to_wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 #[cfg(test)]
