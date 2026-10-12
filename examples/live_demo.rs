@@ -55,7 +55,7 @@ fn main() -> WfpResult<()> {
 
     // Step 3: Subscribe to network events
     println!("Step 3: Subscribing to network events...");
-    let event_subscription = WfpEventSubscription::new(&engine)?;
+    let event_subscription = WfpEventSubscription::new()?;
     println!("   Event subscription active\n");
 
     // Step 4: Add blocking filter for curl.exe
@@ -67,8 +67,8 @@ fn main() -> WfpResult<()> {
         .with_weight(FilterWeight::UserBlock)
         .with_app_path(curl_path.clone());
 
-    let filter_id = FilterBuilder::add_filter(&engine, &block_rule)?;
-    println!("   Filter added (ID: {})\n", filter_id);
+    let filter = FilterBuilder::add_filter(&engine, &block_rule)?;
+    println!("   Filter added (IDs: {:?})\n", filter.ids());
 
     // Step 5: Monitor events
     println!("Step 5: Monitoring network events...");
@@ -105,7 +105,7 @@ fn main() -> WfpResult<()> {
 
     // Cleanup
     println!("\nCleaning up...");
-    FilterBuilder::delete_filter(&engine, filter_id)?;
+    FilterBuilder::delete_filter(&engine, &filter)?;
     println!("   Filter removed");
     drop(event_subscription);
     println!("   Event subscription closed");

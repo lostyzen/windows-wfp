@@ -39,8 +39,8 @@ fn main() -> WfpResult<()> {
         .with_weight(FilterWeight::UserBlock)
         .with_app_path(r"C:\Windows\System32\notepad.exe");
 
-    let filter_id = FilterBuilder::add_filter(&engine, &notepad_rule)?;
-    println!("Filter added (ID: {})\n", filter_id);
+    let filter = FilterBuilder::add_filter(&engine, &notepad_rule)?;
+    println!("Filter added (IDs: {:?})\n", filter.ids());
 
     println!("Filter active for 10 seconds...");
     println!("   (Try opening notepad.exe and accessing network)\n");
@@ -51,7 +51,7 @@ fn main() -> WfpResult<()> {
     }
 
     println!("\nRemoving filter...");
-    FilterBuilder::delete_filter(&engine, filter_id)?;
+    FilterBuilder::delete_filter(&engine, &filter)?;
     println!("Filter removed\n");
 
     println!("Demo complete!");

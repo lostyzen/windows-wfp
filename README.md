@@ -43,14 +43,39 @@ let rule = FilterRule::new("Block curl", Direction::Outbound, Action::Block)
     .with_weight(FilterWeight::UserBlock)
     .with_app_path(r"C:\Windows\System32\curl.exe");
 
-let filter_id = FilterBuilder::add_filter(&engine, &rule)?;
+let filter = FilterBuilder::add_filter(&engine, &rule)?;
 
-// curl.exe is now blocked at kernel level!
+// curl.exe is now blocked at kernel level, over IPv4 and IPv6!
 
 // Clean up
-FilterBuilder::delete_filter(&engine, filter_id)?;
+FilterBuilder::delete_filter(&engine, &filter)?;
 # Ok::<(), windows_wfp::WfpError>(())
 ```
+
+A rule without IP-address conditions is installed on both the IPv4 and IPv6 layers;
+`add_filter` returns a `FilterHandle` owning all the created filter IDs.
+
+## Provider Identity
+
+All filters belong to a WFP provider and sublayer. Use your own GUIDs so your filters
+do not collide with other applications using this crate:
+
+```rust,no_run
+use windows_wfp::{initialize_wfp, WfpConfig, WfpEngine};
+use windows::core::GUID;
+
+let engine = WfpEngine::new()?.with_config(WfpConfig {
+    provider_key: GUID::from_u128(0x0b9a3c1e_5d2f_4e6a_9b7c_1d2e3f4a5b6c),
+    sublayer_key: GUID::from_u128(0x7c6b5a4f_3e2d_4c1b_8a9f_0e1d2c3b4a59),
+    display_name: "my-firewall".into(),
+    ..WfpConfig::default()
+});
+initialize_wfp(&engine)?;
+# Ok::<(), windows_wfp::WfpError>(())
+```
+
+With the default dynamic session, the provider, sublayer and filters are removed
+when the `WfpEngine` is dropped.
 
 ## Filter Conditions
 
@@ -73,8 +98,11 @@ Available conditions:
 - **Protocol** - TCP, UDP, ICMP, ICMPv6, and more
 - **Remote/Local port** - Match specific ports
 - **Remote/Local IP** - Match IP addresses with CIDR masks (IPv4 and IPv6)
-- **Windows service name** - Match by service SID
-- **AppContainer SID** - Match UWP/packaged apps
+
+Not supported yet (rules using them are rejected with `WfpError::UnsupportedCondition`
+instead of silently matching all traffic):
+- **Windows service name**
+- **AppContainer SID**
 
 ## Path Conversion
 
@@ -92,10 +120,10 @@ This crate handles the conversion automatically using `FwpmGetAppIdFromFileName0
 Subscribe to real-time network events:
 
 ```rust,no_run
-use windows_wfp::{WfpEngine, WfpEventSubscription};
+use windows_wfp::WfpEventSubscription;
 
-let engine = WfpEngine::new()?;
-let subscription = WfpEventSubscription::new(&engine)?;
+// Uses its own WFP session: can be moved to another thread freely
+let subscription = WfpEventSubscription::new()?;
 
 loop {
     match subscription.try_recv() {

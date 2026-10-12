@@ -4,15 +4,11 @@
 
 use windows::core::GUID;
 
-/// windows-wfp WFP Provider GUID
-///
-/// Uniquely identifies this firewall application in WFP.
-pub const WFP_PROVIDER_GUID: GUID = GUID::from_u128(0x12345678_1234_5678_1234_567812345678);
+/// Default provider GUID (see [`WfpConfig`](crate::WfpConfig) to use your own)
+pub const WFP_PROVIDER_GUID: GUID = GUID::from_u128(0xa3f883ec_f215_49ac_8586_a6732ef094b5);
 
-/// windows-wfp WFP Sublayer GUID
-///
-/// All windows-wfp filters are added to this sublayer.
-pub const WFP_SUBLAYER_GUID: GUID = GUID::from_u128(0x87654321_4321_8765_4321_876543218765);
+/// Default sublayer GUID (see [`WfpConfig`](crate::WfpConfig) to use your own)
+pub const WFP_SUBLAYER_GUID: GUID = GUID::from_u128(0x1d664e12_1dcd_4212_af7c_83747b4b0312);
 
 /// WFP Layer: FWPM_LAYER_ALE_AUTH_CONNECT_V4
 ///

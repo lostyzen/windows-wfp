@@ -76,9 +76,9 @@ pub struct FilterRule {
     pub weight: u64,
     /// Application executable path (auto-converted to NT kernel path)
     pub app_path: Option<PathBuf>,
-    /// Windows service name (matched via service SID)
+    /// Windows service name — not supported yet: `add_filter` rejects it
     pub service_name: Option<String>,
-    /// AppContainer SID (for UWP/packaged apps)
+    /// AppContainer SID — not supported yet: `add_filter` rejects it
     pub app_container_sid: Option<String>,
     /// Local IP address with CIDR mask
     pub local_ip: Option<IpAddrMask>,
@@ -159,13 +159,13 @@ impl FilterRule {
         self
     }
 
-    /// Set the Windows service name
+    /// Set the Windows service name (not supported yet: `add_filter` returns `UnsupportedCondition`)
     pub fn with_service_name(mut self, name: impl Into<String>) -> Self {
         self.service_name = Some(name.into());
         self
     }
 
-    /// Set the AppContainer SID
+    /// Set the AppContainer SID (not supported yet: `add_filter` returns `UnsupportedCondition`)
     pub fn with_app_container_sid(mut self, sid: impl Into<String>) -> Self {
         self.app_container_sid = Some(sid.into());
         self

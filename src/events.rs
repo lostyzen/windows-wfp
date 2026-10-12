@@ -5,17 +5,19 @@
 
 use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
+use std::collections::HashMap;
 use std::ffi::{c_void, OsString};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::windows::ffi::OsStringExt;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, SystemTime};
 use windows::core::GUID;
 use windows::Win32::Foundation::{ERROR_SUCCESS, FILETIME, HANDLE};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FwpmNetEventSubscribe0, FwpmNetEventUnsubscribe0, FWPM_NET_EVENT1, FWPM_NET_EVENT_CALLBACK0,
-    FWPM_NET_EVENT_SUBSCRIPTION0,
+    FwpmNetEventSubscribe0, FwpmNetEventUnsubscribe0, FWPM_NET_EVENT1, FWPM_NET_EVENT_SUBSCRIPTION0,
 };
 
 /// Network event from WFP
@@ -97,35 +99,31 @@ impl std::fmt::Display for NetworkEventType {
 /// WFP Event Subscription Handle
 ///
 /// RAII wrapper for WFP event subscription. Automatically unsubscribes on drop.
-/// Events are delivered via an mpsc channel for thread-safe processing.
+/// Events are delivered via an unbounded mpsc channel.
+///
+/// The subscription owns a dedicated WFP session, so it is independent of any
+/// other [`WfpEngine`] and can be moved freely between threads.
 pub struct WfpEventSubscription {
-    engine: *const WfpEngine,
     subscription_handle: HANDLE,
-    _callback: Box<FWPM_NET_EVENT_CALLBACK0>, // Keep callback alive
     receiver: mpsc::Receiver<NetworkEvent>,
-    /// Raw pointer to the boxed `Sender<NetworkEvent>` used as the WFP callback context.
-    /// Must be freed after `FwpmNetEventUnsubscribe0` to avoid a memory leak.
-    sender_context: *mut c_void,
+    /// Registry ID passed to WFP as the callback context instead of a pointer
+    id: usize,
+    engine: WfpEngine,
 }
 
 impl WfpEventSubscription {
     /// Subscribe to WFP network events
     ///
-    /// Creates a new event subscription that monitors network events.
-    /// Events are delivered via the returned receiver channel.
+    /// Opens a dedicated WFP session and subscribes to network events on it.
+    /// Requires administrator privileges.
     ///
     /// # Errors
     ///
-    /// Returns error if subscription fails (permissions, invalid engine, etc.)
-    pub fn new(engine: &WfpEngine) -> WfpResult<Self> {
+    /// Returns error if the session cannot be opened or the subscription fails.
+    pub fn new() -> WfpResult<Self> {
+        let engine = WfpEngine::new()?;
         let (sender, receiver) = mpsc::channel();
-
-        // Box the channel sender so it has a stable address for the context pointer
-        let sender_box = Box::new(sender);
-        let context = Box::into_raw(sender_box) as *mut c_void;
-
-        // Create the callback function
-        let callback: FWPM_NET_EVENT_CALLBACK0 = Some(event_callback);
+        let id = register(sender);
 
         // Create subscription for all events
         let subscription = FWPM_NET_EVENT_SUBSCRIPTION0 {
@@ -136,31 +134,28 @@ impl WfpEventSubscription {
 
         let mut subscription_handle = HANDLE::default();
 
-        unsafe {
-            let result = FwpmNetEventSubscribe0(
+        let result = unsafe {
+            FwpmNetEventSubscribe0(
                 engine.handle(),
                 &subscription,
-                callback,
-                Some(context as *const c_void),
+                Some(event_callback),
+                Some(id as *const c_void),
                 &mut subscription_handle,
-            );
-
-            if result != ERROR_SUCCESS.0 {
-                // Clean up the boxed sender on error
-                drop(Box::from_raw(context as *mut mpsc::Sender<NetworkEvent>));
-                return Err(WfpError::Other(format!(
-                    "Failed to subscribe to WFP events: error code {}",
-                    result
-                )));
-            }
+            )
+        };
+        if result != ERROR_SUCCESS.0 {
+            unregister(id);
+            return Err(WfpError::Other(format!(
+                "Failed to subscribe to WFP events: error code {}",
+                result
+            )));
         }
 
         Ok(Self {
-            engine: engine as *const WfpEngine,
             subscription_handle,
-            _callback: Box::new(callback), // Keep callback alive to prevent GC
             receiver,
-            sender_context: context,
+            id,
+            engine,
         })
     }
 
@@ -174,7 +169,7 @@ impl WfpEventSubscription {
         self.receiver.recv()
     }
 
-    /// Get an iterator over pending events
+    /// Blocking iterator over incoming events
     pub fn iter(&self) -> mpsc::Iter<'_, NetworkEvent> {
         self.receiver.iter()
     }
@@ -182,56 +177,68 @@ impl WfpEventSubscription {
 
 impl Drop for WfpEventSubscription {
     fn drop(&mut self) {
-        if !self.subscription_handle.is_invalid() && !self.engine.is_null() {
-            unsafe {
-                // Unsubscribe first so no more callbacks can fire before we free the context
-                let _ = FwpmNetEventUnsubscribe0((*self.engine).handle(), self.subscription_handle);
-            }
+        // Must run without the registry lock: unsubscribing may wait for a running callback.
+        if !self.subscription_handle.is_invalid() {
+            let _ =
+                unsafe { FwpmNetEventUnsubscribe0(self.engine.handle(), self.subscription_handle) };
         }
-        // Free the boxed Sender that was passed as the WFP callback context.
-        // Safe to do now because WfpmNetEventUnsubscribe0 guarantees no further callbacks.
-        if !self.sender_context.is_null() {
-            unsafe {
-                drop(Box::from_raw(
-                    self.sender_context as *mut mpsc::Sender<NetworkEvent>,
-                ));
-            }
-        }
+        // Callbacks still delivered (e.g. if unsubscribing failed) no longer find the ID.
+        unregister(self.id);
     }
 }
 
-// SAFETY: WfpEventSubscription is Send because the WFP subscription handle and callback
-// context can be safely transferred between threads. The raw `engine` pointer is only
-// dereferenced in `Drop::drop` to call `FwpmNetEventUnsubscribe0`; callers must ensure the
-// borrowed `WfpEngine` outlives this subscription (e.g. by declaring it after the engine in
-// a containing struct, so it drops first).
+// SAFETY: the subscription owns its WFP session (`WfpEngine` is Send) and its receiver;
+// the subscription handle is an opaque kernel handle and the WFP context is a plain ID.
 unsafe impl Send for WfpEventSubscription {}
 
 // WfpEventSubscription is NOT Sync: the mpsc::Receiver requires exclusive access.
+
+type Subscribers = HashMap<usize, mpsc::Sender<NetworkEvent>>;
+
+/// Senders of live subscriptions, keyed by the ID given to WFP as callback context
+fn subscribers() -> MutexGuard<'static, Subscribers> {
+    static SUBSCRIBERS: OnceLock<Mutex<Subscribers>> = OnceLock::new();
+    SUBSCRIBERS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+fn register(sender: mpsc::Sender<NetworkEvent>) -> usize {
+    // IDs are never reused, so a late callback cannot reach a newer subscription
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    subscribers().insert(id, sender);
+    id
+}
+
+fn unregister(id: usize) {
+    subscribers().remove(&id);
+}
+
+fn dispatch(id: usize, event: NetworkEvent) {
+    if let Some(sender) = subscribers().get(&id) {
+        // Unbounded channel: never blocks, only fails once the receiver is gone
+        let _ = sender.send(event);
+    }
+}
 
 /// Native callback function invoked by WFP (runs on WFP worker thread)
 ///
 /// # Safety
 ///
-/// This function receives raw pointers from WFP and must carefully:
-/// - Validate the event pointer is not null
-/// - Parse the FWPM_NET_EVENT1 structure
-/// - Send the parsed event to the channel without blocking
+/// `event_ptr` must be null or point to a complete FWPM_NET_EVENT1 provided by WFP.
 unsafe extern "system" fn event_callback(context: *mut c_void, event_ptr: *const FWPM_NET_EVENT1) {
-    // Validate pointers
-    if context.is_null() || event_ptr.is_null() {
+    if event_ptr.is_null() {
         return;
     }
 
-    // Recover the sender from the context
-    let sender = &*(context as *const mpsc::Sender<NetworkEvent>);
-
-    // Parse the event
-    let event = &*event_ptr;
-    if let Some(network_event) = parse_network_event(event) {
-        // Send to channel (non-blocking - drops event if channel is full)
-        let _ = sender.send(network_event);
-    }
+    // A panic must never unwind into WFP
+    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+        if let Some(network_event) = parse_network_event(&*event_ptr) {
+            dispatch(context as usize, network_event);
+        }
+    }));
 }
 
 /// Parse FWPM_NET_EVENT1 into NetworkEvent
@@ -474,6 +481,53 @@ mod tests {
         assert_eq!(cloned.event_type, NetworkEventType::ClassifyAllow);
         assert_eq!(cloned.protocol, 17);
         assert!(cloned.app_path.is_none());
+    }
+
+    fn callback_with_empty_event(id: usize) {
+        let event = FWPM_NET_EVENT1::default();
+        unsafe { event_callback(id as *mut c_void, &event) };
+    }
+
+    #[test]
+    fn test_callback_delivers_to_registered_subscription() {
+        let (sender, receiver) = mpsc::channel();
+        let id = register(sender);
+
+        callback_with_empty_event(id);
+        assert!(receiver.try_recv().is_ok());
+
+        unregister(id);
+    }
+
+    #[test]
+    fn test_late_callback_after_unregister_is_ignored() {
+        let (sender, receiver) = mpsc::channel();
+        let id = register(sender);
+        unregister(id);
+
+        callback_with_empty_event(id);
+        // Sender was dropped with its registry entry and nothing was delivered
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn test_callback_ignores_unknown_or_null_context() {
+        callback_with_empty_event(0);
+        callback_with_empty_event(usize::MAX);
+        unsafe { event_callback(std::ptr::null_mut(), std::ptr::null()) };
+    }
+
+    #[test]
+    fn test_ids_are_unique() {
+        let (a, _ra) = mpsc::channel();
+        let (b, _rb) = mpsc::channel();
+        let (id_a, id_b) = (register(a), register(b));
+        assert_ne!(id_a, id_b);
+        unregister(id_a);
+        unregister(id_b);
     }
 
     #[test]

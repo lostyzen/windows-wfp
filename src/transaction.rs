@@ -4,7 +4,7 @@
 
 use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::Foundation::{ERROR_SUCCESS, FWP_E_TXN_IN_PROGRESS};
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmTransactionAbort0, FwpmTransactionBegin0, FwpmTransactionCommit0,
 };
@@ -70,6 +70,21 @@ impl<'a> WfpTransaction<'a> {
             engine,
             committed: false,
         })
+    }
+
+    /// Begin a transaction, or return `None` if the session already has one in progress
+    pub(crate) fn begin_unless_in_progress(engine: &'a WfpEngine) -> WfpResult<Option<Self>> {
+        let result = unsafe { FwpmTransactionBegin0(engine.handle(), 0) };
+        if result == FWP_E_TXN_IN_PROGRESS.0 as u32 {
+            return Ok(None);
+        }
+        if result != ERROR_SUCCESS.0 {
+            return Err(WfpError::TransactionBeginFailed);
+        }
+        Ok(Some(Self {
+            engine,
+            committed: false,
+        }))
     }
 
     /// Commit the transaction

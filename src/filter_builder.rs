@@ -27,23 +27,166 @@
 //!
 //! This ensures filters work correctly without requiring users to know about NT kernel paths.
 
-use crate::condition::Protocol;
+use crate::condition::{IpAddrMask, Protocol};
 use crate::constants::*;
 use crate::engine::WfpEngine;
 use crate::errors::{WfpError, WfpResult};
 use crate::filter::{Action, FilterRule};
 use crate::layer;
+use crate::transaction::WfpTransaction;
+use std::ffi::c_void;
 use std::net::IpAddr;
+use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
 use std::ptr;
-use windows::core::{GUID, PWSTR};
+use windows::core::{GUID, PCWSTR, PWSTR};
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmFilterAdd0, FwpmFilterDeleteById0, FwpmFreeMemory0, FwpmGetAppIdFromFileName0,
-    FWPM_FILTER0, FWPM_FILTER_CONDITION0, FWPM_FILTER_FLAGS, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT,
-    FWP_ACTION_TYPE, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE, FWP_CONDITION_VALUE0, FWP_MATCH_EQUAL,
-    FWP_UINT16, FWP_UINT64, FWP_UINT8, FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK,
-    FWP_V6_ADDR_AND_MASK, FWP_V6_ADDR_MASK,
+    FWPM_ACTION0, FWPM_DISPLAY_DATA0, FWPM_FILTER0, FWPM_FILTER_CONDITION0, FWPM_FILTER_FLAGS,
+    FWP_ACTION_BLOCK, FWP_ACTION_PERMIT, FWP_ACTION_TYPE, FWP_BYTE_BLOB, FWP_BYTE_BLOB_TYPE,
+    FWP_CONDITION_VALUE0, FWP_CONDITION_VALUE0_0, FWP_DATA_TYPE, FWP_MATCH_EQUAL, FWP_UINT16,
+    FWP_UINT64, FWP_UINT8, FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_V6_ADDR_AND_MASK,
+    FWP_V6_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0,
 };
+
+/// Handle to the WFP filters created from one [`FilterRule`]
+///
+/// A rule without IP-family-specific conditions is installed on both the IPv4
+/// and IPv6 layers, so a single rule may own several WFP filter IDs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterHandle {
+    ids: Vec<u64>,
+}
+
+impl FilterHandle {
+    /// WFP filter IDs owned by this handle
+    pub fn ids(&self) -> &[u64] {
+        &self.ids
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IpFamily {
+    V4,
+    V6,
+}
+
+impl IpFamily {
+    fn of(ip: &IpAddrMask) -> Self {
+        if ip.is_ipv6() {
+            IpFamily::V6
+        } else {
+            IpFamily::V4
+        }
+    }
+}
+
+/// Owned blob returned by `FwpmGetAppIdFromFileName0`, freed on drop
+struct AppId(*mut FWP_BYTE_BLOB);
+
+impl AppId {
+    fn from_path(path: &Path) -> WfpResult<Self> {
+        let path_wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut blob: *mut FWP_BYTE_BLOB = ptr::null_mut();
+        let result = unsafe { FwpmGetAppIdFromFileName0(PCWSTR(path_wide.as_ptr()), &mut blob) };
+
+        if result != ERROR_SUCCESS.0 || blob.is_null() {
+            return Err(WfpError::AppPathNotFound(path.display().to_string()));
+        }
+        Ok(Self(blob))
+    }
+}
+
+impl Drop for AppId {
+    fn drop(&mut self) {
+        unsafe { FwpmFreeMemory0(&mut self.0 as *mut *mut FWP_BYTE_BLOB as *mut *mut c_void) };
+    }
+}
+
+/// Reject conditions that cannot be translated, instead of silently dropping them
+fn check_supported_conditions(rule: &FilterRule) -> WfpResult<()> {
+    if rule.service_name.is_some() {
+        return Err(WfpError::UnsupportedCondition("service_name".into()));
+    }
+    if rule.app_container_sid.is_some() {
+        return Err(WfpError::UnsupportedCondition("app_container_sid".into()));
+    }
+    Ok(())
+}
+
+/// IP families (and therefore WFP layers) the rule must be installed on
+fn target_families(rule: &FilterRule) -> WfpResult<Vec<IpFamily>> {
+    let constraints = [
+        rule.remote_ip
+            .as_ref()
+            .map(|ip| (IpFamily::of(ip), "remote IP")),
+        rule.local_ip
+            .as_ref()
+            .map(|ip| (IpFamily::of(ip), "local IP")),
+        match rule.protocol {
+            Some(Protocol::Icmp) => Some((IpFamily::V4, "ICMP protocol")),
+            Some(Protocol::Icmpv6) => Some((IpFamily::V6, "ICMPv6 protocol")),
+            _ => None,
+        },
+    ];
+
+    let mut required: Option<(IpFamily, &str)> = None;
+    for (family, source) in constraints.into_iter().flatten() {
+        match required {
+            Some((other, other_source)) if other != family => {
+                return Err(WfpError::InvalidRule(format!(
+                    "{source} requires {family:?} but {other_source} requires {other:?}"
+                )));
+            }
+            _ => required = Some((family, source)),
+        }
+    }
+
+    Ok(match required {
+        Some((family, _)) => vec![family],
+        None => vec![IpFamily::V4, IpFamily::V6],
+    })
+}
+
+fn v4_addr_mask(ip: &IpAddrMask) -> Option<FWP_V4_ADDR_AND_MASK> {
+    match ip.addr {
+        IpAddr::V4(v4) => Some(FWP_V4_ADDR_AND_MASK {
+            addr: u32::from(v4),
+            mask: FilterBuilder::prefix_to_v4_mask(ip.prefix_len),
+        }),
+        IpAddr::V6(_) => None,
+    }
+}
+
+fn v6_addr_mask(ip: &IpAddrMask) -> Option<FWP_V6_ADDR_AND_MASK> {
+    match ip.addr {
+        IpAddr::V6(v6) => Some(FWP_V6_ADDR_AND_MASK {
+            addr: v6.octets(),
+            prefixLength: ip.prefix_len,
+        }),
+        IpAddr::V4(_) => None,
+    }
+}
+
+fn condition(
+    field: GUID,
+    data_type: FWP_DATA_TYPE,
+    value: FWP_CONDITION_VALUE0_0,
+) -> FWPM_FILTER_CONDITION0 {
+    FWPM_FILTER_CONDITION0 {
+        fieldKey: field,
+        matchType: FWP_MATCH_EQUAL,
+        conditionValue: FWP_CONDITION_VALUE0 {
+            r#type: data_type,
+            Anonymous: value,
+        },
+    }
+}
 
 /// WFP Filter builder
 ///
@@ -61,9 +204,9 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
 ///     .with_weight(FilterWeight::UserBlock)
 ///     .with_app_path(r"C:\Windows\System32\curl.exe");
 ///
-/// let filter_id = FilterBuilder::add_filter(&engine, &rule)?;
+/// let filter = FilterBuilder::add_filter(&engine, &rule)?;
 /// // Later: remove the filter
-/// FilterBuilder::delete_filter(&engine, filter_id)?;
+/// FilterBuilder::delete_filter(&engine, &filter)?;
 /// # Ok::<(), windows_wfp::WfpError>(())
 /// ```
 pub struct FilterBuilder;
@@ -99,9 +242,21 @@ impl FilterBuilder {
     ///
     /// Translates a [`FilterRule`] and adds it to the WFP engine.
     ///
+    /// Rules without IPv4/IPv6-specific conditions are installed on both the IPv4
+    /// and IPv6 layers so they cannot be bypassed over the other IP family.
+    ///
+    /// The operation is all-or-nothing: it runs in its own WFP transaction, or, when
+    /// called inside a caller's [`WfpTransaction`], removes the filters it already added
+    /// if a later one fails.
+    ///
     /// # Errors
     ///
-    /// Returns `WfpError::FilterAddFailed` if the filter cannot be added.
+    /// - `WfpError::UnsupportedCondition` if the rule uses a condition not yet translated
+    /// - `WfpError::InvalidRule` if the rule mixes IPv4 and IPv6 conditions
+    /// - `WfpError::AppPathNotFound` if the application path cannot be resolved
+    /// - `WfpError::FilterAddFailed` if WFP rejects the filter
+    /// - `WfpError::RollbackFailed` if, inside a caller's transaction, filters already
+    ///   added could not be removed (their IDs are reported; abort the transaction or delete them)
     ///
     /// # Examples
     ///
@@ -113,235 +268,149 @@ impl FilterBuilder {
     ///
     /// let rule = FilterRule::new("Allow all outbound", Direction::Outbound, Action::Permit)
     ///     .with_weight(FilterWeight::DefaultPermit);
-    /// let filter_id = FilterBuilder::add_filter(&engine, &rule)?;
+    /// let filter = FilterBuilder::add_filter(&engine, &rule)?;
     /// # Ok::<(), windows_wfp::WfpError>(())
     /// ```
-    pub fn add_filter(engine: &WfpEngine, rule: &FilterRule) -> WfpResult<u64> {
-        // Determine if rule uses IPv6 (check both remote_ip and local_ip)
-        let is_ipv6 = rule
-            .remote_ip
-            .as_ref()
-            .map(|ip| ip.is_ipv6())
-            .or_else(|| rule.local_ip.as_ref().map(|ip| ip.is_ipv6()))
-            .unwrap_or(false);
+    pub fn add_filter(engine: &WfpEngine, rule: &FilterRule) -> WfpResult<FilterHandle> {
+        check_supported_conditions(rule)?;
+        let families = target_families(rule)?;
 
-        let layer_key = layer::select_layer(rule.direction, is_ipv6);
-        let action = Self::translate_action(rule.action);
+        // DOS paths never match in the kernel: WFP needs the NT path produced here.
+        let app_id = rule.app_path.as_deref().map(AppId::from_path).transpose()?;
 
-        // Convert name to wide string - must outlive FwpmFilterAdd0 call
-        let name_wide: Vec<u16> = rule.name.encode_utf16().chain(std::iter::once(0)).collect();
+        // WFP forbids nested transactions: inside a caller's one, roll back by hand.
+        let txn = WfpTransaction::begin_unless_in_progress(engine)?;
 
-        // Weight storage - must outlive FwpmFilterAdd0 call
-        let weight_value: u64 = rule.weight;
-
-        // CRITICAL: Convert DOS path to NT kernel format using FwpmGetAppIdFromFileName0.
-        // If the conversion fails (e.g. file not found), return an error instead of silently
-        // skipping the condition, which would cause the filter to match ALL applications.
-        let app_id_blob: Option<*mut FWP_BYTE_BLOB> = if let Some(app_path) = &rule.app_path {
-            let path_str = app_path.to_string_lossy().to_string();
-            // path_wide must remain alive for the duration of the API call
-            let path_wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
-
-            let mut blob_ptr: *mut FWP_BYTE_BLOB = ptr::null_mut();
-            let result = unsafe {
-                FwpmGetAppIdFromFileName0(PWSTR(path_wide.as_ptr() as *mut u16), &mut blob_ptr)
-            };
-
-            if result != ERROR_SUCCESS.0 {
-                return Err(WfpError::AppPathNotFound(path_str));
+        let mut ids = Vec::with_capacity(families.len());
+        for family in families {
+            match Self::add_filter_for_family(engine, rule, family, app_id.as_ref()) {
+                Ok(id) => ids.push(id),
+                // Dropping `txn` aborts every add made in it
+                Err(err) if txn.is_some() => return Err(err),
+                Err(err) => return Err(Self::rollback(engine, ids, err)),
             }
+        }
 
-            Some(blob_ptr)
+        if let Some(txn) = txn {
+            txn.commit()?;
+        }
+        Ok(FilterHandle { ids })
+    }
+
+    /// Delete filters added before `error`; report those that could not be removed
+    fn rollback(engine: &WfpEngine, ids: Vec<u64>, error: WfpError) -> WfpError {
+        let active_filter_ids: Vec<u64> = ids
+            .into_iter()
+            .filter(|&id| Self::delete_filter_by_id(engine, id).is_err())
+            .collect();
+
+        if active_filter_ids.is_empty() {
+            error
         } else {
-            None
-        };
+            WfpError::RollbackFailed {
+                error: Box::new(error),
+                active_filter_ids,
+            }
+        }
+    }
 
-        let remote_v4_mask: Option<FWP_V4_ADDR_AND_MASK> =
-            rule.remote_ip.as_ref().and_then(|remote_ip| {
-                if let IpAddr::V4(ipv4) = remote_ip.addr {
-                    Some(FWP_V4_ADDR_AND_MASK {
-                        addr: u32::from_be_bytes(ipv4.octets()),
-                        mask: Self::prefix_to_v4_mask(remote_ip.prefix_len),
-                    })
-                } else {
-                    None
-                }
-            });
+    fn add_filter_for_family(
+        engine: &WfpEngine,
+        rule: &FilterRule,
+        family: IpFamily,
+        app_id: Option<&AppId>,
+    ) -> WfpResult<u64> {
+        let config = engine.config();
+        let layer_key = layer::select_layer(rule.direction, family == IpFamily::V6);
 
-        let remote_v6_mask: Option<FWP_V6_ADDR_AND_MASK> =
-            rule.remote_ip.as_ref().and_then(|remote_ip| {
-                if let IpAddr::V6(ipv6) = remote_ip.addr {
-                    Some(FWP_V6_ADDR_AND_MASK {
-                        addr: ipv6.octets(),
-                        prefixLength: remote_ip.prefix_len,
-                    })
-                } else {
-                    None
-                }
-            });
+        // Everything referenced by raw pointer below must outlive FwpmFilterAdd0
+        let name_wide: Vec<u16> = rule.name.encode_utf16().chain(std::iter::once(0)).collect();
+        let weight_value: u64 = rule.weight;
+        let remote_v4 = rule.remote_ip.as_ref().and_then(v4_addr_mask);
+        let local_v4 = rule.local_ip.as_ref().and_then(v4_addr_mask);
+        let remote_v6 = rule.remote_ip.as_ref().and_then(v6_addr_mask);
+        let local_v6 = rule.local_ip.as_ref().and_then(v6_addr_mask);
 
-        let local_v4_mask: Option<FWP_V4_ADDR_AND_MASK> =
-            rule.local_ip.as_ref().and_then(|local_ip| {
-                if let IpAddr::V4(ipv4) = local_ip.addr {
-                    Some(FWP_V4_ADDR_AND_MASK {
-                        addr: u32::from_be_bytes(ipv4.octets()),
-                        mask: Self::prefix_to_v4_mask(local_ip.prefix_len),
-                    })
-                } else {
-                    None
-                }
-            });
-
-        let local_v6_mask: Option<FWP_V6_ADDR_AND_MASK> =
-            rule.local_ip.as_ref().and_then(|local_ip| {
-                if let IpAddr::V6(ipv6) = local_ip.addr {
-                    Some(FWP_V6_ADDR_AND_MASK {
-                        addr: ipv6.octets(),
-                        prefixLength: local_ip.prefix_len,
-                    })
-                } else {
-                    None
-                }
-            });
-
-        // Build conditions
         let mut conditions = Vec::new();
 
-        // Condition: APP_ID (application path in NT kernel format)
-        if let Some(blob_ptr) = app_id_blob {
-            conditions.push(FWPM_FILTER_CONDITION0 {
-                fieldKey: CONDITION_ALE_APP_ID,
-                matchType: FWP_MATCH_EQUAL,
-                conditionValue: FWP_CONDITION_VALUE0 {
-                    r#type: FWP_BYTE_BLOB_TYPE,
-                    Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
-                        byteBlob: blob_ptr,
-                    },
-                },
-            });
+        if let Some(app_id) = app_id {
+            conditions.push(condition(
+                CONDITION_ALE_APP_ID,
+                FWP_BYTE_BLOB_TYPE,
+                FWP_CONDITION_VALUE0_0 { byteBlob: app_id.0 },
+            ));
         }
-
-        // Condition: REMOTE_PORT
-        if let Some(remote_port) = rule.remote_port {
-            conditions.push(FWPM_FILTER_CONDITION0 {
-                fieldKey: CONDITION_IP_REMOTE_PORT,
-                matchType: FWP_MATCH_EQUAL,
-                conditionValue: FWP_CONDITION_VALUE0 {
-                    r#type: FWP_UINT16,
-                    Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
-                        uint16: remote_port,
-                    },
-                },
-            });
+        if let Some(port) = rule.remote_port {
+            conditions.push(condition(
+                CONDITION_IP_REMOTE_PORT,
+                FWP_UINT16,
+                FWP_CONDITION_VALUE0_0 { uint16: port },
+            ));
         }
-
-        // Condition: LOCAL_PORT
-        if let Some(local_port) = rule.local_port {
-            conditions.push(FWPM_FILTER_CONDITION0 {
-                fieldKey: CONDITION_IP_LOCAL_PORT,
-                matchType: FWP_MATCH_EQUAL,
-                conditionValue: FWP_CONDITION_VALUE0 {
-                    r#type: FWP_UINT16,
-                    Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
-                        uint16: local_port,
-                    },
-                },
-            });
+        if let Some(port) = rule.local_port {
+            conditions.push(condition(
+                CONDITION_IP_LOCAL_PORT,
+                FWP_UINT16,
+                FWP_CONDITION_VALUE0_0 { uint16: port },
+            ));
         }
-
-        // Condition: PROTOCOL
         if let Some(protocol) = rule.protocol {
-            conditions.push(FWPM_FILTER_CONDITION0 {
-                fieldKey: CONDITION_IP_PROTOCOL,
-                matchType: FWP_MATCH_EQUAL,
-                conditionValue: FWP_CONDITION_VALUE0 {
-                    r#type: FWP_UINT8,
-                    Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
-                        uint8: Self::translate_protocol(protocol),
-                    },
+            conditions.push(condition(
+                CONDITION_IP_PROTOCOL,
+                FWP_UINT8,
+                FWP_CONDITION_VALUE0_0 {
+                    uint8: Self::translate_protocol(protocol),
                 },
-            });
+            ));
         }
-
-        // Condition: REMOTE_IP (IPv4)
-        if let Some(ref mask) = remote_v4_mask {
-            conditions.push(FWPM_FILTER_CONDITION0 {
-                fieldKey: CONDITION_IP_REMOTE_ADDRESS,
-                matchType: FWP_MATCH_EQUAL,
-                conditionValue: FWP_CONDITION_VALUE0 {
-                    r#type: FWP_V4_ADDR_MASK,
-                    Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
+        for (field, mask) in [
+            (CONDITION_IP_REMOTE_ADDRESS, &remote_v4),
+            (CONDITION_IP_LOCAL_ADDRESS, &local_v4),
+        ] {
+            if let Some(mask) = mask {
+                conditions.push(condition(
+                    field,
+                    FWP_V4_ADDR_MASK,
+                    FWP_CONDITION_VALUE0_0 {
                         v4AddrMask: mask as *const _ as *mut _,
                     },
-                },
-            });
+                ));
+            }
         }
-
-        // Condition: REMOTE_IP (IPv6)
-        if let Some(ref mask) = remote_v6_mask {
-            conditions.push(FWPM_FILTER_CONDITION0 {
-                fieldKey: CONDITION_IP_REMOTE_ADDRESS,
-                matchType: FWP_MATCH_EQUAL,
-                conditionValue: FWP_CONDITION_VALUE0 {
-                    r#type: FWP_V6_ADDR_MASK,
-                    Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
+        for (field, mask) in [
+            (CONDITION_IP_REMOTE_ADDRESS, &remote_v6),
+            (CONDITION_IP_LOCAL_ADDRESS, &local_v6),
+        ] {
+            if let Some(mask) = mask {
+                conditions.push(condition(
+                    field,
+                    FWP_V6_ADDR_MASK,
+                    FWP_CONDITION_VALUE0_0 {
                         v6AddrMask: mask as *const _ as *mut _,
                     },
-                },
-            });
+                ));
+            }
         }
 
-        // Condition: LOCAL_IP (IPv4)
-        if let Some(ref mask) = local_v4_mask {
-            conditions.push(FWPM_FILTER_CONDITION0 {
-                fieldKey: CONDITION_IP_LOCAL_ADDRESS,
-                matchType: FWP_MATCH_EQUAL,
-                conditionValue: FWP_CONDITION_VALUE0 {
-                    r#type: FWP_V4_ADDR_MASK,
-                    Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
-                        v4AddrMask: mask as *const _ as *mut _,
-                    },
-                },
-            });
-        }
-
-        // Condition: LOCAL_IP (IPv6)
-        if let Some(ref mask) = local_v6_mask {
-            conditions.push(FWPM_FILTER_CONDITION0 {
-                fieldKey: CONDITION_IP_LOCAL_ADDRESS,
-                matchType: FWP_MATCH_EQUAL,
-                conditionValue: FWP_CONDITION_VALUE0 {
-                    r#type: FWP_V6_ADDR_MASK,
-                    Anonymous: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0 {
-                        v6AddrMask: mask as *const _ as *mut _,
-                    },
-                },
-            });
-        }
-
-        // Create the filter structure
         let filter = FWPM_FILTER0 {
             filterKey: GUID::zeroed(),
-            displayData:
-                windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_DISPLAY_DATA0 {
-                    name: PWSTR(name_wide.as_ptr() as *mut u16),
-                    description: PWSTR::null(),
-                },
+            displayData: FWPM_DISPLAY_DATA0 {
+                name: PWSTR(name_wide.as_ptr() as *mut u16),
+                description: PWSTR::null(),
+            },
             flags: FWPM_FILTER_FLAGS(0),
-            providerKey: &WFP_PROVIDER_GUID as *const _ as *mut _,
-            providerData:
-                windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_BYTE_BLOB {
-                    size: 0,
-                    data: ptr::null_mut(),
-                },
+            providerKey: &config.provider_key as *const GUID as *mut GUID,
+            providerData: FWP_BYTE_BLOB {
+                size: 0,
+                data: ptr::null_mut(),
+            },
             layerKey: layer_key,
-            subLayerKey: WFP_SUBLAYER_GUID,
-            weight: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_VALUE0 {
+            subLayerKey: config.sublayer_key,
+            weight: FWP_VALUE0 {
                 r#type: FWP_UINT64,
-                Anonymous:
-                    windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_VALUE0_0 {
-                        uint64: &weight_value as *const u64 as *mut u64,
-                    },
+                Anonymous: FWP_VALUE0_0 {
+                    uint64: &weight_value as *const u64 as *mut u64,
+                },
             },
             numFilterConditions: conditions.len() as u32,
             filterCondition: if conditions.is_empty() {
@@ -349,8 +418,8 @@ impl FilterBuilder {
             } else {
                 conditions.as_ptr() as *mut _
             },
-            action: windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_ACTION0 {
-                r#type: action,
+            action: FWPM_ACTION0 {
+                r#type: Self::translate_action(rule.action),
                 Anonymous: Default::default(),
             },
             Anonymous: Default::default(),
@@ -360,35 +429,27 @@ impl FilterBuilder {
         };
 
         let mut filter_id: u64 = 0;
+        let result =
+            unsafe { FwpmFilterAdd0(engine.handle(), &filter, None, Some(&mut filter_id)) };
 
-        unsafe {
-            let result = FwpmFilterAdd0(engine.handle(), &filter, None, Some(&mut filter_id));
-
-            // Free memory allocated by FwpmGetAppIdFromFileName0 regardless of add result
-            if let Some(mut blob_ptr) = app_id_blob {
-                if !blob_ptr.is_null() {
-                    FwpmFreeMemory0(&mut blob_ptr as *mut _ as *mut *mut _);
-                }
-            }
-
-            if result != ERROR_SUCCESS.0 {
-                return Err(WfpError::FilterAddFailed(format!(
-                    "Failed to add filter '{}': error code {}",
-                    rule.name, result
-                )));
-            }
+        if result != ERROR_SUCCESS.0 {
+            return Err(WfpError::FilterAddFailed(format!(
+                "Failed to add filter '{}' ({:?} layer): error code {}",
+                rule.name, family, result
+            )));
         }
 
         Ok(filter_id)
     }
 
-    /// Delete filter from WFP engine by ID
+    /// Delete all WFP filters owned by a [`FilterHandle`]
     ///
-    /// Removes a previously added filter using its unique ID.
+    /// Attempts to delete every filter even if one deletion fails, and returns
+    /// the first error encountered.
     ///
     /// # Errors
     ///
-    /// Returns `WfpError::FilterDeleteFailed` if the filter cannot be deleted.
+    /// Returns `WfpError::FilterDeleteFailed` if a filter cannot be deleted.
     ///
     /// # Examples
     ///
@@ -400,13 +461,28 @@ impl FilterBuilder {
     ///
     /// let rule = FilterRule::new("Allow all", Direction::Outbound, Action::Permit)
     ///     .with_weight(FilterWeight::DefaultPermit);
-    /// let filter_id = FilterBuilder::add_filter(&engine, &rule)?;
+    /// let filter = FilterBuilder::add_filter(&engine, &rule)?;
     ///
     /// // Later: remove the filter
-    /// FilterBuilder::delete_filter(&engine, filter_id)?;
+    /// FilterBuilder::delete_filter(&engine, &filter)?;
     /// # Ok::<(), windows_wfp::WfpError>(())
     /// ```
-    pub fn delete_filter(engine: &WfpEngine, filter_id: u64) -> WfpResult<()> {
+    pub fn delete_filter(engine: &WfpEngine, filter: &FilterHandle) -> WfpResult<()> {
+        let mut first_error = None;
+        for &id in &filter.ids {
+            if let Err(err) = Self::delete_filter_by_id(engine, id) {
+                first_error.get_or_insert(err);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// Delete a single WFP filter by ID (e.g. one found with [`FilterEnumerator`](crate::FilterEnumerator))
+    ///
+    /// # Errors
+    ///
+    /// Returns `WfpError::FilterDeleteFailed` if the filter cannot be deleted.
+    pub fn delete_filter_by_id(engine: &WfpEngine, filter_id: u64) -> WfpResult<()> {
         unsafe {
             let result = FwpmFilterDeleteById0(engine.handle(), filter_id);
 
@@ -426,7 +502,7 @@ impl FilterBuilder {
 mod tests {
     use super::*;
     use crate::condition::Protocol;
-    use crate::filter::{Action, FilterRule};
+    use crate::filter::{Action, Direction, FilterRule};
 
     #[test]
     fn test_action_translation() {
@@ -479,6 +555,107 @@ mod tests {
         assert_eq!(FilterBuilder::prefix_to_v4_mask(255), 0xFFFFFFFF);
     }
 
+    fn rule() -> FilterRule {
+        FilterRule::new("Test", Direction::Outbound, Action::Block)
+    }
+
+    fn cidr(s: &str) -> IpAddrMask {
+        IpAddrMask::from_cidr(s).unwrap()
+    }
+
+    #[test]
+    fn test_service_name_is_rejected() {
+        let result = check_supported_conditions(&rule().with_service_name("dnscache"));
+        assert!(matches!(result, Err(WfpError::UnsupportedCondition(c)) if c == "service_name"));
+    }
+
+    #[test]
+    fn test_app_container_sid_is_rejected() {
+        let result = check_supported_conditions(&rule().with_app_container_sid("S-1-15-2-1"));
+        assert!(
+            matches!(result, Err(WfpError::UnsupportedCondition(c)) if c == "app_container_sid")
+        );
+    }
+
+    #[test]
+    fn test_supported_conditions_are_accepted() {
+        let rule = rule()
+            .with_app_path(r"C:\test.exe")
+            .with_protocol(Protocol::Tcp)
+            .with_remote_port(443)
+            .with_remote_ip(cidr("10.0.0.0/8"));
+        assert!(check_supported_conditions(&rule).is_ok());
+    }
+
+    #[test]
+    fn test_rule_without_ip_targets_both_families() {
+        let families = target_families(&rule().with_app_path(r"C:\test.exe")).unwrap();
+        assert_eq!(families, vec![IpFamily::V4, IpFamily::V6]);
+
+        let families = target_families(&rule().with_protocol(Protocol::Tcp)).unwrap();
+        assert_eq!(families, vec![IpFamily::V4, IpFamily::V6]);
+    }
+
+    #[test]
+    fn test_ip_conditions_select_single_family() {
+        let v4 = target_families(&rule().with_remote_ip(cidr("1.1.1.1/32"))).unwrap();
+        assert_eq!(v4, vec![IpFamily::V4]);
+
+        let v6 = target_families(&rule().with_local_ip(cidr("::1/128"))).unwrap();
+        assert_eq!(v6, vec![IpFamily::V6]);
+
+        let both_v4 = target_families(
+            &rule()
+                .with_remote_ip(cidr("1.1.1.1/32"))
+                .with_local_ip(cidr("10.0.0.0/8")),
+        )
+        .unwrap();
+        assert_eq!(both_v4, vec![IpFamily::V4]);
+    }
+
+    #[test]
+    fn test_icmp_protocols_select_family() {
+        let v4 = target_families(&rule().with_protocol(Protocol::Icmp)).unwrap();
+        assert_eq!(v4, vec![IpFamily::V4]);
+
+        let v6 = target_families(&rule().with_protocol(Protocol::Icmpv6)).unwrap();
+        assert_eq!(v6, vec![IpFamily::V6]);
+    }
+
+    #[test]
+    fn test_mixed_families_are_rejected() {
+        let mixed_ips = rule()
+            .with_remote_ip(cidr("1.1.1.1/32"))
+            .with_local_ip(cidr("::1/128"));
+        assert!(matches!(
+            target_families(&mixed_ips),
+            Err(WfpError::InvalidRule(_))
+        ));
+
+        let icmp_v6_ip = rule()
+            .with_protocol(Protocol::Icmp)
+            .with_remote_ip(cidr("2001:db8::/32"));
+        assert!(matches!(
+            target_families(&icmp_v6_ip),
+            Err(WfpError::InvalidRule(_))
+        ));
+    }
+
+    #[test]
+    fn test_addr_masks_match_family() {
+        let v4 = cidr("192.168.1.0/24");
+        let mask = v4_addr_mask(&v4).unwrap();
+        assert_eq!(mask.addr, 0xC0A80100);
+        assert_eq!(mask.mask, 0xFFFFFF00);
+        assert!(v6_addr_mask(&v4).is_none());
+
+        let v6 = cidr("2001:db8::/32");
+        let mask = v6_addr_mask(&v6).unwrap();
+        assert_eq!(mask.prefixLength, 32);
+        assert_eq!(mask.addr[..4], [0x20, 0x01, 0x0d, 0xb8]);
+        assert!(v4_addr_mask(&v6).is_none());
+    }
+
     #[test]
     #[ignore] // Requires admin privileges
     fn test_add_simple_filter() {
@@ -499,10 +676,30 @@ mod tests {
 
         let rule = FilterRule::allow_all_outbound();
 
-        let filter_id = FilterBuilder::add_filter(&engine, &rule).expect("Failed to add filter");
-        let result = FilterBuilder::delete_filter(&engine, filter_id);
+        let filter = FilterBuilder::add_filter(&engine, &rule).expect("Failed to add filter");
+        assert_eq!(
+            filter.ids().len(),
+            2,
+            "Expected one IPv4 and one IPv6 filter"
+        );
+        let result = FilterBuilder::delete_filter(&engine, &filter);
 
         assert!(result.is_ok(), "Failed to delete filter: {:?}", result);
+    }
+
+    #[test]
+    #[ignore] // Requires admin privileges
+    fn test_add_filter_inside_caller_transaction() {
+        let engine = WfpEngine::new().expect("Failed to create engine");
+        crate::initialize_wfp(&engine).expect("Failed to initialize WFP");
+
+        let txn = WfpTransaction::begin(&engine).expect("Failed to begin transaction");
+        let filter = FilterBuilder::add_filter(&engine, &FilterRule::allow_all_outbound())
+            .expect("add_filter must work inside a caller transaction");
+        txn.commit().expect("Failed to commit");
+
+        assert_eq!(filter.ids().len(), 2);
+        FilterBuilder::delete_filter(&engine, &filter).expect("Failed to delete filter");
     }
 
     #[test]
