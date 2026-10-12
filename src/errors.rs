@@ -54,6 +54,16 @@ pub enum WfpError {
     #[error("Invalid filter rule: {0}")]
     InvalidRule(String),
 
+    /// Adding a rule failed and filters already created for it could not be removed
+    #[error("{error}; rollback failed, filters still active: {active_filter_ids:?}")]
+    RollbackFailed {
+        /// Error that interrupted the rule installation
+        #[source]
+        error: Box<WfpError>,
+        /// WFP filter IDs left in place
+        active_filter_ids: Vec<u64>,
+    },
+
     /// Insufficient permissions (must run as administrator)
     #[error("Insufficient permissions - administrator privileges required")]
     InsufficientPermissions,
@@ -121,6 +131,19 @@ mod tests {
             WfpError::AppPathNotFound(r"C:\missing.exe".into()).to_string(),
             r"Application path not found or invalid: C:\missing.exe"
         );
+    }
+
+    #[test]
+    fn test_rollback_failed_reports_cause_and_ids() {
+        let err = WfpError::RollbackFailed {
+            error: Box::new(WfpError::FilterAddFailed("v6".into())),
+            active_filter_ids: vec![42],
+        };
+        assert_eq!(
+            err.to_string(),
+            "Failed to add filter: v6; rollback failed, filters still active: [42]"
+        );
+        assert!(std::error::Error::source(&err).is_some());
     }
 
     #[test]
