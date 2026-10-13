@@ -94,12 +94,19 @@ pub struct FilterRule {
 
 impl FilterRule {
     /// Create a new filter rule with required fields
+    ///
+    /// The default weight is [`FilterWeight::UserBlock`] for `Block` rules and
+    /// [`FilterWeight::UserPermit`] for `Permit` rules.
     pub fn new(name: impl Into<String>, direction: Direction, action: Action) -> Self {
+        let weight = match action {
+            Action::Block => FilterWeight::UserBlock,
+            Action::Permit => FilterWeight::UserPermit,
+        };
         Self {
             name: name.into(),
             direction,
             action,
-            weight: FilterWeight::UserPermit.value(),
+            weight: weight.value(),
             app_path: None,
             service_name: None,
             app_container_sid: None,
@@ -206,9 +213,12 @@ mod tests {
         assert_eq!(rule.name, "Test");
         assert_eq!(rule.direction, Direction::Outbound);
         assert_eq!(rule.action, Action::Block);
-        assert_eq!(rule.weight, FilterWeight::UserPermit.value());
+        assert_eq!(rule.weight, FilterWeight::UserBlock.value());
         assert!(rule.app_path.is_none());
         assert!(rule.protocol.is_none());
+
+        let permit = FilterRule::new("Test", Direction::Outbound, Action::Permit);
+        assert_eq!(permit.weight, FilterWeight::UserPermit.value());
     }
 
     #[test]
@@ -246,13 +256,9 @@ mod tests {
 
     #[test]
     fn test_with_ip_conditions() {
-        use std::net::IpAddr;
         let rule = FilterRule::new("IP filter", Direction::Outbound, Action::Block)
-            .with_remote_ip(IpAddrMask::new(
-                "192.168.1.0".parse::<IpAddr>().unwrap(),
-                24,
-            ))
-            .with_local_ip(IpAddrMask::new("10.0.0.1".parse::<IpAddr>().unwrap(), 32));
+            .with_remote_ip(IpAddrMask::from_cidr("192.168.1.0/24").unwrap())
+            .with_local_ip(IpAddrMask::from_cidr("10.0.0.1/32").unwrap());
 
         assert!(rule.remote_ip.is_some());
         assert_eq!(rule.remote_ip.as_ref().unwrap().prefix_len, 24);
@@ -302,15 +308,14 @@ mod tests {
 
     #[test]
     fn test_full_builder_chain() {
-        use std::net::IpAddr;
         let rule = FilterRule::new("Full", Direction::Outbound, Action::Block)
             .with_weight(FilterWeight::UserBlock)
             .with_app_path(r"C:\test.exe")
             .with_protocol(Protocol::Tcp)
             .with_remote_port(443)
             .with_local_port(0)
-            .with_remote_ip(IpAddrMask::new("1.1.1.1".parse::<IpAddr>().unwrap(), 32))
-            .with_local_ip(IpAddrMask::new("10.0.0.1".parse::<IpAddr>().unwrap(), 32))
+            .with_remote_ip(IpAddrMask::from_cidr("1.1.1.1/32").unwrap())
+            .with_local_ip(IpAddrMask::from_cidr("10.0.0.1/32").unwrap())
             .with_service_name("svc")
             .with_app_container_sid("sid");
 

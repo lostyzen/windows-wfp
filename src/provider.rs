@@ -7,7 +7,7 @@ use crate::errors::{WfpError, WfpResult};
 use crate::transaction::WfpTransaction;
 use std::ptr;
 use windows::core::PWSTR;
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::Foundation::FWP_E_ALREADY_EXISTS;
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmProviderAdd0, FwpmSubLayerAdd0, FWPM_PROVIDER0, FWPM_SUBLAYER0,
 };
@@ -26,7 +26,7 @@ impl WfpProvider {
     ///
     /// # Errors
     ///
-    /// Returns `WfpError::Other` if provider registration fails.
+    /// Returns `WfpError::Api` if provider registration fails.
     ///
     /// # Examples
     ///
@@ -59,21 +59,8 @@ impl WfpProvider {
             serviceName: PWSTR::null(),
         };
 
-        unsafe {
-            let result = FwpmProviderAdd0(engine.handle(), &provider, None);
-
-            if result != ERROR_SUCCESS.0 {
-                // ERROR_FWP_ALREADY_EXISTS (0x80320009) is acceptable
-                if result != 0x80320009 {
-                    return Err(WfpError::Other(format!(
-                        "Failed to register provider: error code {}",
-                        result
-                    )));
-                }
-            }
-        }
-
-        Ok(())
+        let result = unsafe { FwpmProviderAdd0(engine.handle(), &provider, None) };
+        ignore_already_exists(WfpError::check("FwpmProviderAdd0", result))
     }
 }
 
@@ -91,7 +78,7 @@ impl WfpSublayer {
     ///
     /// # Errors
     ///
-    /// Returns `WfpError::Other` if sublayer registration fails.
+    /// Returns `WfpError::Api` if sublayer registration fails.
     ///
     /// # Examples
     ///
@@ -126,21 +113,8 @@ impl WfpSublayer {
             weight: config.sublayer_weight,
         };
 
-        unsafe {
-            let result = FwpmSubLayerAdd0(engine.handle(), &sublayer, None);
-
-            if result != ERROR_SUCCESS.0 {
-                // ERROR_FWP_ALREADY_EXISTS (0x80320009) is acceptable
-                if result != 0x80320009 {
-                    return Err(WfpError::Other(format!(
-                        "Failed to register sublayer: error code {}",
-                        result
-                    )));
-                }
-            }
-        }
-
-        Ok(())
+        let result = unsafe { FwpmSubLayerAdd0(engine.handle(), &sublayer, None) };
+        ignore_already_exists(WfpError::check("FwpmSubLayerAdd0", result))
     }
 }
 
@@ -176,6 +150,14 @@ pub fn initialize_wfp(engine: &WfpEngine) -> WfpResult<()> {
 
 fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Registration is idempotent: an object that already exists is not an error
+fn ignore_already_exists(result: WfpResult<()>) -> WfpResult<()> {
+    match result {
+        Err(WfpError::Api { code, .. }) if code == FWP_E_ALREADY_EXISTS.0 as u32 => Ok(()),
+        other => other,
+    }
 }
 
 #[cfg(test)]

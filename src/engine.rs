@@ -6,7 +6,7 @@ use crate::constants::{WFP_PROVIDER_GUID, WFP_SUBLAYER_GUID};
 use crate::errors::{WfpError, WfpResult};
 use std::ptr;
 use windows::core::{GUID, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmEngineClose0, FwpmEngineOpen0, FWPM_SESSION0, FWPM_SESSION_FLAG_DYNAMIC,
 };
@@ -83,10 +83,9 @@ impl WfpEngine {
     ///
     /// # Errors
     ///
-    /// Returns `WfpError::EngineOpenFailed` if:
-    /// - Insufficient permissions (not running as admin)
-    /// - WFP service not available
-    /// - Session creation failed
+    /// - `WfpError::InsufficientPermissions` if not running as administrator
+    /// - `WfpError::ServiceNotAvailable` if the BFE service is not running
+    /// - `WfpError::Api` for any other failure
     ///
     /// # Examples
     ///
@@ -108,7 +107,7 @@ impl WfpEngine {
     ///
     /// # Errors
     ///
-    /// Returns `WfpError::EngineOpenFailed` if session creation fails.
+    /// Same as [`WfpEngine::new`].
     pub fn new_with_flags(flags: u32) -> WfpResult<Self> {
         let session = FWPM_SESSION0 {
             sessionKey: windows::core::GUID::zeroed(),
@@ -123,27 +122,16 @@ impl WfpEngine {
 
         let mut handle = HANDLE::default();
 
-        unsafe {
-            let result = FwpmEngineOpen0(
+        let result = unsafe {
+            FwpmEngineOpen0(
                 PCWSTR::null(),
                 10, // RPC_C_AUTHN_WINNT (Windows NT authentication)
                 None,
                 Some(&session),
                 &mut handle,
-            );
-
-            if result != ERROR_SUCCESS.0 {
-                return match result {
-                    5 => Err(WfpError::InsufficientPermissions),
-                    1062 | 1075 => Err(WfpError::ServiceNotAvailable),
-                    _ => Err(WfpError::Other(format!(
-                        "FwpmEngineOpen0 failed with Windows error code: {} (0x{:X}). \
-                        Common causes: BFE service not running, insufficient privileges, or WFP driver not loaded.",
-                        result, result
-                    ))),
-                };
-            }
-        }
+            )
+        };
+        WfpError::check("FwpmEngineOpen0", result)?;
 
         Ok(Self {
             handle,
@@ -240,7 +228,7 @@ mod tests {
             match err {
                 WfpError::InsufficientPermissions => (),
                 WfpError::ServiceNotAvailable => (),
-                WfpError::EngineOpenFailed => (),
+                WfpError::Api { .. } => (),
                 other => panic!("Unexpected error: {:?}", other),
             }
         }

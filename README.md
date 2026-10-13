@@ -88,8 +88,12 @@ let rule = FilterRule::new("HTTPS only", Direction::Outbound, Action::Permit)
     .with_weight(FilterWeight::UserPermit)
     .with_app_path(r"C:\myapp\app.exe")
     .with_protocol(Protocol::Tcp)
-    .with_remote_port(443)
-    .with_remote_ip(IpAddrMask::from_cidr("0.0.0.0/0").unwrap());
+    .with_remote_port(443);
+// No IP condition: installed on both the IPv4 and IPv6 layers.
+
+// An IP condition pins the rule to that address family:
+let ipv4_only = rule.clone().with_remote_ip(IpAddrMask::from_cidr("0.0.0.0/0")?); // all IPv4, no IPv6
+let lan_only = rule.with_remote_ip(IpAddrMask::from_cidr("192.168.0.0/16")?);      // IPv4 LAN only
 # Ok::<(), windows_wfp::WfpError>(())
 ```
 
@@ -103,6 +107,22 @@ Not supported yet (rules using them are rejected with `WfpError::UnsupportedCond
 instead of silently matching all traffic):
 - **Windows service name**
 - **AppContainer SID**
+
+## Rule Validation
+
+`FilterRule::new(name, direction, action)` is all a rule needs; every condition is optional
+and a rule without conditions matches all traffic in that direction. Before calling WFP,
+`FilterBuilder::add_filter` checks the rule, in this order:
+
+| Check | Error |
+|---|---|
+| No unsupported condition (`service_name`, `app_container_sid`) | `WfpError::UnsupportedCondition` |
+| CIDR prefix within range (≤ /32 for IPv4, ≤ /128 for IPv6) | `WfpError::InvalidAddress` |
+| Remote IP, local IP and ICMP/ICMPv6 protocol all target the same IP family | `WfpError::InvalidRule` |
+| `app_path` points to an existing executable | `WfpError::AppPathNotFound` |
+
+A rejected rule installs nothing. Once these checks pass, the remaining failures come from
+WFP itself (`WfpError::Api`), e.g. missing Administrator rights or `initialize_wfp` not called.
 
 ## Path Conversion
 
@@ -139,6 +159,13 @@ loop {
 }
 # Ok::<(), windows_wfp::WfpError>(())
 ```
+
+Event fields (`app_path`, addresses, ports, protocol) are `None` when WFP did not
+provide them. `app_path` is in NT kernel format (`\device\harddiskvolume3\...`).
+
+Windows does not collect `ClassifyAllow` events by default. Enable them with
+`engine.set_classify_allow_events(true)`; note this is a **system-wide, persistent**
+setting.
 
 ## Examples
 

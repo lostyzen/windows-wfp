@@ -3,6 +3,7 @@
 //! Types used as filter conditions in WFP rules: IP addresses with masks,
 //! and IP protocol numbers.
 
+use crate::errors::{WfpError, WfpResult};
 use std::fmt;
 use std::net::IpAddr;
 
@@ -14,16 +15,19 @@ use std::net::IpAddr;
 ///
 /// ```
 /// use windows_wfp::IpAddrMask;
-/// use std::net::IpAddr;
 ///
 /// // Match a single host
-/// let host = IpAddrMask::new("192.168.1.1".parse().unwrap(), 32);
+/// let host = IpAddrMask::new("192.168.1.1".parse().unwrap(), 32)?;
 ///
 /// // Match a /24 subnet
-/// let subnet = IpAddrMask::from_cidr("192.168.1.0/24").unwrap();
+/// let subnet = IpAddrMask::from_cidr("192.168.1.0/24")?;
 ///
 /// // Match an IPv6 address
-/// let ipv6 = IpAddrMask::new("::1".parse().unwrap(), 128);
+/// let ipv6 = IpAddrMask::new("::1".parse().unwrap(), 128)?;
+///
+/// // Prefix longer than the address is rejected
+/// assert!(IpAddrMask::new("10.0.0.0".parse().unwrap(), 33).is_err());
+/// # Ok::<(), windows_wfp::WfpError>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IpAddrMask {
@@ -35,42 +39,56 @@ pub struct IpAddrMask {
 
 impl IpAddrMask {
     /// Create a new IP address with mask
-    pub fn new(addr: IpAddr, prefix_len: u8) -> Self {
-        Self { addr, prefix_len }
+    ///
+    /// # Errors
+    ///
+    /// Returns `WfpError::InvalidAddress` if `prefix_len` exceeds 32 (IPv4) or 128 (IPv6).
+    pub fn new(addr: IpAddr, prefix_len: u8) -> WfpResult<Self> {
+        let mask = Self { addr, prefix_len };
+        mask.validate()?;
+        Ok(mask)
     }
 
     /// Parse from CIDR notation (e.g., "192.168.1.0/24" or "::1/128")
     ///
     /// # Errors
     ///
-    /// Returns an error string if the format is invalid.
-    pub fn from_cidr(s: &str) -> Result<Self, String> {
-        let parts: Vec<&str> = s.split('/').collect();
-        if parts.len() != 2 {
-            return Err(format!("Invalid CIDR notation: {}", s));
-        }
+    /// Returns `WfpError::InvalidAddress` if the format or prefix length is invalid.
+    pub fn from_cidr(s: &str) -> WfpResult<Self> {
+        let (addr, prefix_len) = s
+            .split_once('/')
+            .ok_or_else(|| WfpError::InvalidAddress(format!("invalid CIDR notation: {s}")))?;
 
-        let addr: IpAddr = parts[0]
+        let addr: IpAddr = addr
             .parse()
-            .map_err(|e| format!("Invalid IP address: {}", e))?;
+            .map_err(|e| WfpError::InvalidAddress(format!("invalid IP address in {s}: {e}")))?;
 
-        let prefix_len: u8 = parts[1]
+        let prefix_len: u8 = prefix_len
             .parse()
-            .map_err(|e| format!("Invalid prefix length: {}", e))?;
+            .map_err(|e| WfpError::InvalidAddress(format!("invalid prefix length in {s}: {e}")))?;
 
-        let max_prefix = match addr {
+        Self::new(addr, prefix_len)
+    }
+
+    /// Check that the prefix length fits the address family
+    ///
+    /// Useful when the public fields were set directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns `WfpError::InvalidAddress` if `prefix_len` is too long.
+    pub fn validate(&self) -> WfpResult<()> {
+        let max_prefix = match self.addr {
             IpAddr::V4(_) => 32,
             IpAddr::V6(_) => 128,
         };
-
-        if prefix_len > max_prefix {
-            return Err(format!(
-                "Prefix length {} exceeds maximum {} for {:?}",
-                prefix_len, max_prefix, addr
-            ));
+        if self.prefix_len > max_prefix {
+            return Err(WfpError::InvalidAddress(format!(
+                "prefix length {} exceeds maximum {} for {}",
+                self.prefix_len, max_prefix, self.addr
+            )));
         }
-
-        Ok(Self { addr, prefix_len })
+        Ok(())
     }
 
     /// Returns true if this is an IPv6 address
@@ -147,9 +165,27 @@ mod tests {
 
     #[test]
     fn test_ip_addr_mask_new() {
-        let mask = IpAddrMask::new("10.0.0.1".parse().unwrap(), 24);
+        let mask = IpAddrMask::new("10.0.0.1".parse().unwrap(), 24).unwrap();
         assert_eq!(mask.prefix_len, 24);
         assert!(!mask.is_ipv6());
+    }
+
+    #[test]
+    fn test_ip_addr_mask_new_rejects_long_prefix() {
+        assert!(matches!(
+            IpAddrMask::new("10.0.0.1".parse().unwrap(), 33),
+            Err(WfpError::InvalidAddress(_))
+        ));
+        assert!(IpAddrMask::new("::1".parse().unwrap(), 129).is_err());
+        assert!(IpAddrMask::new("::1".parse().unwrap(), 128).is_ok());
+    }
+
+    #[test]
+    fn test_validate_detects_direct_field_assignment() {
+        let mut mask = IpAddrMask::from_cidr("10.0.0.0/8").unwrap();
+        assert!(mask.validate().is_ok());
+        mask.prefix_len = 40;
+        assert!(mask.validate().is_err());
     }
 
     #[test]
@@ -208,11 +244,11 @@ mod tests {
 
     #[test]
     fn test_ip_addr_mask_equality() {
-        let a = IpAddrMask::new("10.0.0.1".parse().unwrap(), 24);
-        let b = IpAddrMask::new("10.0.0.1".parse().unwrap(), 24);
+        let a = IpAddrMask::from_cidr("10.0.0.1/24").unwrap();
+        let b = IpAddrMask::from_cidr("10.0.0.1/24").unwrap();
         assert_eq!(a, b);
 
-        let c = IpAddrMask::new("10.0.0.1".parse().unwrap(), 16);
+        let c = IpAddrMask::from_cidr("10.0.0.1/16").unwrap();
         assert_ne!(a, c);
     }
 
@@ -228,13 +264,13 @@ mod tests {
 
     #[test]
     fn test_ip_addr_mask_v4_is_not_ipv6() {
-        let mask = IpAddrMask::new("192.168.0.1".parse().unwrap(), 24);
+        let mask = IpAddrMask::from_cidr("192.168.0.1/24").unwrap();
         assert!(!mask.is_ipv6());
     }
 
     #[test]
     fn test_ip_addr_mask_v6_is_ipv6() {
-        let mask = IpAddrMask::new("::1".parse().unwrap(), 128);
+        let mask = IpAddrMask::from_cidr("::1/128").unwrap();
         assert!(mask.is_ipv6());
     }
 
